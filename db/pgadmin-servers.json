@@ -1,0 +1,34 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "fintechP (production)",
+      "Group": "masker",
+      "Host": "masker-db",
+      "Port": 5432,
+      "MaintenanceDB": "fintechP",
+      "Username": "masker",
+      "SSLMode": "prefer",
+      "Comment": "Production data (raw mock PII). Password: masker"
+    },
+    "2": {
+      "Name": "fintechT (test)",
+      "Group": "masker",
+      "Host": "masker-db",
+      "Port": 5432,
+      "MaintenanceDB": "fintechT",
+      "Username": "masker",
+      "SSLMode": "prefer",
+      "Comment": "Test data (masked rows only). Password: masker"
+    },
+    "3": {
+      "Name": "bus (messages)",
+      "Group": "masker",
+      "Host": "masker-db",
+      "Port": 5432,
+      "MaintenanceDB": "bus",
+      "Username": "masker",
+      "SSLMode": "prefer",
+      "Comment": "Agent-to-agent message bus. Password: masker"
+    }
+  }
+}

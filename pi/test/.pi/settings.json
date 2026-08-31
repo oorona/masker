@@ -1,0 +1,7 @@
+{
+  "defaultThinkingLevel": "low",
+  "extensions": [
+    "../../extensions/mailbox.ts",
+    "../../extensions/bank-db.ts"
+  ]
+}

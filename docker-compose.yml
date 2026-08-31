@@ -1,0 +1,61 @@
+# Single Postgres container hosting all three PoC databases:
+#   "fintechP" - production data (sensitive, seeded with mock PII)
+#   "fintechT" - test data (same schema, starts empty; filled with masked rows)
+#   bus        - shared mailbox the two Pi agents communicate through
+services:
+  db:
+    image: postgres:16
+    container_name: masker-db
+    environment:
+      POSTGRES_USER: masker
+      POSTGRES_PASSWORD: masker
+      POSTGRES_DB: masker
+    ports:
+      - "5432:5432"
+    volumes:
+      - masker-pgdata:/var/lib/postgresql/data
+      # Init scripts run once, in alphabetical order, on first boot of an empty volume.
+      - ./db/01-create-databases.sql:/docker-entrypoint-initdb.d/01-create-databases.sql:ro
+      - ./db/02-schema.sql:/docker-entrypoint-initdb.d/02-schema.sql:ro
+      # Shared table DDL — mounted but NOT in initdb.d, so it only runs when
+      # 02-schema.sql \i-includes it (once per data database).
+      - ./db/bank-ddl.sql:/sql/bank-ddl.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U masker -d masker"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    # Single-homed on the project network only. (Attaching it to a second network
+    # such as `dbnet` breaks the host-published 5432 port via asymmetric return
+    # routing — host clients see "server terminated abnormally". The local pgAdmin
+    # below shares this network, so it reaches the DB by name without that.)
+    networks:
+      - default
+
+  # Local pgAdmin for THIS project. Published on localhost only, on the same
+  # network as the db, with the masker server pre-registered. Open it at
+  # http://localhost:5050  (login: admin@masker.local / masker).
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: masker-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@masker.com
+      PGADMIN_DEFAULT_PASSWORD: masker
+      # Server mode so the default user exists and servers.json is auto-imported
+      # for it on first boot. Master password off so it never prompts for one.
+      PGADMIN_CONFIG_SERVER_MODE: "True"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+    ports:
+      - "127.0.0.1:5050:80"                          # localhost-only
+    volumes:
+      - masker-pgadmin:/var/lib/pgadmin
+      - ./db/pgadmin-servers.json:/pgadmin4/servers.json:ro   # auto-register masker-db
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - default
+
+volumes:
+  masker-pgdata:
+  masker-pgadmin:

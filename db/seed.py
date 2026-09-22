@@ -24,7 +24,7 @@ from __future__ import annotations
 import argparse
 import os
 import random
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 import psycopg
 from faker import Faker

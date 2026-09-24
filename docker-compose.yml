@@ -63,10 +63,11 @@ services:
     networks:
       - default
 
-  # Bus monitor + control plane. The page starts/stops the prod emulator (child
-  # process, pi/tools/prod-emulator.mjs) and the in-process test agent, and runs
-  # db/seed.py / truncates for the database buttons. MASKER_CONTROL=0 makes it a
-  # pure observer. Published on localhost:5056 so it never collides with
+  # Bus monitor + control plane. The page starts/stops the two Pi agents (pi is
+  # installed in the image; log in once with `docker exec -it masker-ui pi` →
+  # /login, persisted in the masker-pi-home volume), or their model-free
+  # emulators, and runs db/seed.py / truncates for the database buttons.
+  # MASKER_CONTROL=0 makes it a pure observer. Published on localhost:5056 so it never collides with
   # ./pi/ui/run.sh (5055); the home overlay exposes it through Traefik instead.
   masker-ui:
     build:
@@ -86,7 +87,10 @@ services:
     mem_limit: 512m
     tmpfs:
       - /tmp:size=64m,uid=${APP_UID:-1000},gid=${APP_GID:-1000}
+    volumes:
+      - masker-pi-home:/home/node/.pi        # Pi login (auth.json), settings, sessions
     environment:
+      HOME: /home/node
       MASKER_UI_HOST: 0.0.0.0
       MASKER_UI_PORT: "5055"
       MASKER_CONTROL: ${MASKER_CONTROL:-1}
@@ -122,3 +126,4 @@ services:
 volumes:
   masker-pgdata:
   masker-pgadmin:
+  masker-pi-home:

@@ -141,6 +141,16 @@
   .controls .row + .row { margin-top: 8px; }
   .controls .meta { font-size: 11.5px; color: var(--muted); }
 
+  /* agent mode switch */
+  .mode { display: inline-flex; border: 1px solid var(--border); border-radius: 999px; overflow: hidden; }
+  .mode button { font-size: 11.5px; padding: 3px 10px; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+  .mode button.on { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); font-weight: 600; }
+  .mode button:disabled { cursor: default; opacity: .6; }
+  .model { font-family: var(--mono); font-size: 11.5px; color: var(--accent); }
+  .say { display: none; }
+  .say.show { display: block; }
+  .say textarea { width: 100%; min-height: 64px; resize: vertical; font-family: var(--sans); font-size: 13px; }
+
   /* request form (test agent) */
   .emu { display: none; }
   .control .emu { display: block; }
@@ -300,12 +310,17 @@
         </div>
         <dl class="kv">
           <dt>database</dt><dd>fintechT (masked rows only)</dd>
+          <dt>model</dt><dd><span class="model" id="test-model">–</span></dd>
         </dl>
         <div class="tools">
           <span class="chip accent">mailbox_send</span><span class="chip accent">mailbox_wait</span>
           <span class="chip accent">insert_rows</span><span class="chip accent">local_watermark</span>
         </div>
         <div class="controls">
+          <div class="row">
+            <span class="mode" id="test-mode"><button data-mode="pi">Pi agent</button><button data-mode="emulated">emulated</button></span>
+            <span class="meta" id="test-mode-note"></span>
+          </div>
           <div class="row">
             <button class="btn primary" id="btn-test-start">▶ start</button>
             <button class="btn" id="btn-test-stop">■ stop</button>
@@ -321,6 +336,24 @@
           </div>
         </div>
       </div>
+    </div>
+
+    <div class="card say" id="say">
+      <div class="hd">Tell the test agent what to do</div>
+      <div class="bd">
+        <textarea id="say-text">Pull 5 customers and their accounts and cards from production into the test database, then show me what landed.</textarea>
+        <div class="row" style="margin-top:8px">
+          <button class="btn primary" id="btn-say">send to test agent →</button>
+          <button class="btn" id="btn-say-sync">sync new data</button>
+          <span class="meta" id="say-note"></span>
+        </div>
+        <div class="hint" style="margin-top:8px">Each prompt is one run of the real Pi test agent. It talks to prod over the bus with its own tools; the masked rows it receives land in fintechT.</div>
+      </div>
+    </div>
+
+    <div class="card trace say" id="test-trace-card">
+      <div class="hd">test live trace <span class="grow"></span><button class="btn sm" id="btn-clear-test-trace">clear</button></div>
+      <div class="bd" id="test-trace"><div class="hint" id="test-trace-hint">The test agent's thinking, tool calls and narration appear here while it works on a prompt.</div></div>
     </div>
 
     <div class="card emu" id="emu">
@@ -410,12 +443,17 @@
         <dl class="kv">
           <dt>database</dt><dd>fintechP (raw PII, never shown here)</dd>
           <dt>boundary</dt><dd>pi/lib/mask.ts</dd>
+          <dt>model</dt><dd><span class="model" id="prod-model">–</span></dd>
         </dl>
         <div class="tools">
           <span class="chip accent">mailbox_wait</span><span class="chip accent">query_masked</span><span class="chip accent">mailbox_send</span>
           <span class="chip blocked">bash</span><span class="chip blocked">read</span><span class="chip blocked">write</span><span class="chip blocked">edit</span>
         </div>
         <div class="controls">
+          <div class="row">
+            <span class="mode" id="prod-mode"><button data-mode="pi">Pi agent</button><button data-mode="emulated">emulated</button></span>
+            <span class="meta" id="prod-mode-note"></span>
+          </div>
           <div class="row">
             <button class="btn primary" id="btn-prod-start" style="--accent:var(--prod)">▶ start</button>
             <button class="btn" id="btn-prod-stop">■ stop</button>
@@ -428,7 +466,7 @@
     <div class="card trace">
       <div class="hd">prod live trace <span class="grow"></span><button class="btn sm" id="btn-clear-trace">clear</button></div>
       <div class="bd" id="trace">
-        <div class="hint" id="trace-hint">The prod agent's thinking, tool calls and narration appear here while it handles a request.</div>
+        <div class="hint" id="trace-hint">The prod agent's thinking, tool calls and narration appear here while it handles a request. In Pi mode that is the real agent and its model.</div>
       </div>
     </div>
   </section>
@@ -632,7 +670,7 @@
 
   function resetAll() {
     msgs.clear(); cards.clear(); openRequests.length = 0; pairs.clear(); rtts.length = 0;
-    feed.innerHTML = ""; traceEl.innerHTML = ""; traceCount = 0;
+    feed.innerHTML = ""; traceEl.innerHTML = ""; traceCount = 0; $("test-trace").innerHTML = "";
     const n = el("div", "hint", `bus was cleared at ${fmtTime(new Date().toISOString())}`);
     n.style.textAlign = "center"; feed.appendChild(n);
     $("s-rtt").textContent = "–";
@@ -675,13 +713,26 @@
       $("placeholder-hint").textContent = "Run ./pi/prod/run.sh and ./pi/test/run.sh, then ask the test agent for data.";
       return;
     }
-    const prodOn = s.prod.running, testOn = s.test.running, busy = !!s.test.scenario;
+    const prodOn = s.prod.running, testOn = s.test.running, busy = !!s.test.scenario || !!s.test.busy;
+    const piOk = !!s.pi?.available;
+    for (const a of ["prod", "test"]) {
+      const ag = s[a];
+      for (const b of $(`${a}-mode`).querySelectorAll("button")) { b.classList.toggle("on", b.dataset.mode === ag.mode); b.disabled = ag.running || !!s.run?.active || (b.dataset.mode === "pi" && !piOk); }
+      $(`${a}-model`).textContent = ag.mode === "pi" ? (ag.modelSeen ? `${ag.modelSeen} (seen)` : (ag.model ?? "global Pi default")) : "none — emulated, no model";
+      $(`${a}-mode-note`).textContent = ag.mode === "pi" ? (piOk ? `pi ${s.pi.version}` : "pi not installed") : "plain code, same masking";
+    }
+    const testPi = s.test.mode === "pi";
+    $("say").classList.toggle("show", testPi);
+    $("test-trace-card").classList.toggle("show", testPi);
+    $("emu").style.display = testPi ? "none" : "";
+    $("btn-say").disabled = !testOn || busy || !!s.run?.active; $("btn-say-sync").disabled = !testOn || busy || !!s.run?.active;
+    $("say-note").textContent = !testOn ? "start the test agent first" : s.test.busy ? "working…" : `${s.test.handled} prompt${s.test.handled === 1 ? "" : "s"} handled`;
     pill("prod-pill", prodOn, prodOn ? "running" : "stopped");
     pill("test-pill", testOn, busy ? s.test.scenario : testOn ? "running" : "stopped", busy);
     $("btn-prod-start").disabled = prodOn; $("btn-prod-stop").disabled = !prodOn;
     $("btn-test-start").disabled = testOn; $("btn-test-stop").disabled = !testOn;
-    $("prod-meta").textContent = prodOn ? `pid ${s.prod.pid} · ${s.prod.cycles} request${s.prod.cycles === 1 ? "" : "s"} handled` : "model-free emulator, same masking boundary";
-    $("test-meta").textContent = testOn ? `${s.test.handled} repl${s.test.handled === 1 ? "y" : "ies"} loaded` : "";
+    $("prod-meta").textContent = prodOn ? `${s.prod.mode === "pi" ? "Pi agent" : `pid ${s.prod.pid}`} · ${s.prod.cycles} request${s.prod.cycles === 1 ? "" : "s"} handled` : (s.prod.mode === "pi" ? "one model run per pending request" : "model-free emulator, same masking boundary");
+    $("test-meta").textContent = testOn ? (testPi ? (s.test.busy ? "running a prompt" : "idle, waiting for a prompt") : `${s.test.handled} repl${s.test.handled === 1 ? "y" : "ies"} loaded`) : "";
     $("auto-sync").checked = !!s.test.autoSync;
     $("auto-int").value = String(s.test.intervalMs);
     for (const id of ["btn-send", "btn-slice", "btn-sync"]) $(id).disabled = !testOn || busy;
@@ -704,6 +755,10 @@
     try { const s = await post(url, typeof body === "function" ? body() : body); if (s.control !== undefined) applyState(s); }
     catch (e) { toast(e.message); }
   };
+  for (const a of ["prod", "test"]) for (const b of $(`${a}-mode`).querySelectorAll("button")) b.addEventListener("click", act(`/api/${a}/mode`, { mode: b.dataset.mode }));
+  $("btn-say").addEventListener("click", act("/api/test/say", () => ({ text: $("say-text").value })));
+  $("btn-say-sync").addEventListener("click", act("/api/test/say", { text: "Sync new data from production into the test database." }));
+  $("btn-clear-test-trace").addEventListener("click", () => { $("test-trace").innerHTML = ""; });
   $("btn-prod-start").addEventListener("click", act("/api/prod/start"));
   $("btn-prod-stop").addEventListener("click", act("/api/prod/stop"));
   $("btn-test-start").addEventListener("click", act("/api/test/start"));
@@ -769,13 +824,16 @@
 
   // ------------------------------------------------------------ trace
   let traceCount = 0;
+  let traceTarget = traceEl;
   function traceLine(cls, icon, text) {
-    $("trace-hint")?.remove();
+    const t = traceTarget;
+    (t === traceEl ? $("trace-hint") : $("test-trace-hint"))?.remove();
     const line = el("div", `tl ${cls}`);
     line.append(el("span", "ic", icon), el("span", "tx", text));
-    traceEl.appendChild(line);
-    if (++traceCount > 400) { traceEl.firstChild.remove(); traceCount--; }
-    traceEl.scrollTop = traceEl.scrollHeight;
+    t.appendChild(line);
+    if (t === traceEl && ++traceCount > 400) { t.firstChild.remove(); traceCount--; }
+    if (t !== traceEl && t.childElementCount > 400) t.firstChild.remove();
+    t.scrollTop = t.scrollHeight;
     return line;
   }
   function summarize(result) {
@@ -790,8 +848,11 @@
     return clip(text ?? JSON.stringify(result), 200);
   }
   function onTrace(e) {
+    const who = e.agent === "test" ? "test" : "prod";
+    traceTarget = who === "test" ? $("test-trace") : traceEl;
     switch (e.type) {
-      case "agent_start": traceLine("cycle", "▶", `prod woke up${e.emulated ? " (emulated, no model)" : ""} · ${fmtTime(e.at)}`); blink("prod"); break;
+      case "agent_start": traceLine("cycle", "▶", `${who} woke up${e.emulated ? " (emulated, no model)" : " (Pi agent)"} · ${fmtTime(e.at)}`); blink(who); break;
+      case "error": traceLine("result err", "✗", clip(e.error ?? e.message ?? JSON.stringify(e), 300)); break;
       case "tool_execution_start": {
         const l = traceLine("tool", "⚙", "");
         l.querySelector(".tx").append(el("b", null, e.toolName), " ", el("span", null, clip(JSON.stringify(e.args ?? {}), 240)));
@@ -804,6 +865,7 @@
           if ((c.type === "thinking" || c.type === "reasoning") && (c.thinking ?? c.text)?.trim()) traceLine("think", "💭", clip(c.thinking ?? c.text, 600));
           if (c.type === "text" && c.text?.trim()) traceLine("say", "💬", c.text);
         }
+        if (e.message.model) traceLine("end", "◆", `answered by ${e.message.provider ? e.message.provider + "/" : ""}${e.message.model}`);
         break;
       case "agent_end": traceLine("end", "■", `cycle done · ${fmtTime(e.at)}`); break;
     }

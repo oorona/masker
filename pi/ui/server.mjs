@@ -8,12 +8,15 @@
  * Events, relays the prod-side trace (pi/prod/trace.mjs or the emulator), and reports
  * row counts per database.
  *
- * Control plane (MASKER_CONTROL=1):
- *   prod agent   - supervises pi/tools/prod-emulator.mjs as a child process
- *                  (the model-free producer; same masking boundary, same protocol)
- *   test agent   - runs in-process: a mailbox_wait loop that consumes replies and
- *                  inserts the masked rows into fintechT, plus requests from the
- *                  form, the scenarios, and an optional periodic incremental sync
+ * Control plane (MASKER_CONTROL=1). Each agent has two modes:
+ *   prod agent   - "pi": the real Pi agent (pi/prod, model from its .pi/settings.json):
+ *                  the same loop as pi/prod/run.sh — poll the bus, run `pi --mode json`
+ *                  once per pending request, stream its trace to the page.
+ *                  "emulated": pi/tools/prod-emulator.mjs as a child process (no model).
+ *   test agent   - "pi": the real Pi agent (pi/test); the page sends it prompts, each
+ *                  prompt is one `pi --mode json` run whose trace streams to the page.
+ *                  "emulated": an in-process mailbox_wait loop that inserts replies into
+ *                  fintechT, plus the request form, the scenarios and auto-sync.
  *   databases    - seed / append prod (db/seed.py as a child process), empty test,
  *                  clear the bus, full reset
  *
@@ -23,8 +26,9 @@
  */
 import http from "node:http";
 import { readFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import readline from "node:readline";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pgPkg from "pg";
@@ -48,6 +52,20 @@ const REPLY_TIMEOUT_MS = 90_000;
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PI_ROOT = path.resolve(here, "..");
 const REPO_ROOT = path.resolve(PI_ROOT, "..");
+const PI_BIN = process.env.MASKER_PI_BIN ?? "pi";
+const PI_VERSION = (() => {
+	try { const r = spawnSync(PI_BIN, ["--version"], { timeout: 20000, encoding: "utf8" }); return r.status === 0 ? r.stdout.trim() : null; } catch { return null; }
+})();
+const PI_AVAILABLE = PI_VERSION !== null;
+/** provider/model an agent will use, read from its project settings (pi/<agent>/.pi/settings.json). */
+function agentModel(agent) {
+	try {
+		const s = JSON.parse(readFileSync(path.join(PI_ROOT, agent, ".pi", "settings.json"), "utf8"));
+		return s.defaultModel ? `${s.defaultProvider ? s.defaultProvider + "/" : ""}${s.defaultModel}` : null;
+	} catch { return null; }
+}
+const PROD_PROMPT = "There is a pending request in your mailbox. Using only your provided tools, call mailbox_wait to read it, then query_masked to fetch the rows, then mailbox_send to return them to test — narrating each step. Then stop.";
+const SYNC_PROMPT = "Sync new data from production into the test database: for each entity in foreign-key order use local_watermark, ask prod with since_id, wait for the reply and insert the masked rows. Report what landed.";
 const bus = new Pool({ connectionString: BUS_URL, max: 3 });
 const test = new Pool({ connectionString: TEST_URL, max: 2 });
 const prodCounts = CONTROL ? new Pool({ connectionString: PROD_URL, max: 1 }) : null; // count(*) only
@@ -84,16 +102,18 @@ const norm = (m) => ({
 
 // ---------------------------------------------------------------- state
 let busOk = null;
-const prodAgent = { running: false, pid: null, since: null, cycles: 0, child: null, stopping: false };
-const testAgent = { running: false, since: null, autoSync: false, intervalMs: 60_000, timer: null, scenario: null, loop: null, handled: 0 };
+const DEFAULT_MODE = PI_AVAILABLE ? "pi" : "emulated";
+const prodAgent = { mode: DEFAULT_MODE, running: false, pid: null, since: null, cycles: 0, child: null, stopping: false, loop: null, modelSeen: null };
+const testAgent = { mode: DEFAULT_MODE, running: false, since: null, autoSync: false, intervalMs: 60_000, timer: null, scenario: null, loop: null, handled: 0, busy: false, child: null, modelSeen: null };
 const job = { name: null, since: null };
 
 function statePayload() {
 	return {
 		control: CONTROL,
 		bus: busOk,
-		prod: { running: prodAgent.running, pid: prodAgent.pid, since: prodAgent.since, cycles: prodAgent.cycles },
-		test: { running: testAgent.running, since: testAgent.since, autoSync: testAgent.autoSync, intervalMs: testAgent.intervalMs, scenario: testAgent.scenario, handled: testAgent.handled },
+		pi: { available: PI_AVAILABLE, version: PI_VERSION },
+		prod: { mode: prodAgent.mode, running: prodAgent.running, pid: prodAgent.pid, since: prodAgent.since, cycles: prodAgent.cycles, model: agentModel("prod"), modelSeen: prodAgent.modelSeen },
+		test: { mode: testAgent.mode, running: testAgent.running, since: testAgent.since, autoSync: testAgent.autoSync, intervalMs: testAgent.intervalMs, scenario: testAgent.scenario, handled: testAgent.handled, busy: testAgent.busy, model: agentModel("test"), modelSeen: testAgent.modelSeen },
 		job: job.name ? { name: job.name, since: job.since } : null,
 		run: runSummary(),
 	};
@@ -173,9 +193,99 @@ async function stats() {
 	broadcast("stats", out);
 }
 
-// ---------------------------------------------------------------- prod agent (child process)
+// ---------------------------------------------------------------- trace ingestion (from trace.mjs, the emulator, or a pi run)
+function ingestTrace(agent, ev) {
+	const out = { at: new Date().toISOString(), agent, ...ev };
+	if (ev.type === "message_end" && ev.message?.role === "assistant" && ev.message?.model) {
+		const seen = `${ev.message.provider ? ev.message.provider + "/" : ""}${ev.message.model}`;
+		const a = agent === "test" ? testAgent : prodAgent;
+		if (a.modelSeen !== seen) { a.modelSeen = seen; log(agent, `model answering: ${seen}`); pushState(); }
+	}
+	if (ev.type === "agent_end" && agent === "prod") { prodAgent.cycles += 1; pushState(); }
+	if (ev.type === "error" || ev.error) log(agent, `error: ${ev.error ?? ev.message ?? JSON.stringify(ev).slice(0, 200)}`);
+	traceLog.push(out);
+	while (traceLog.length > TRACE_KEEP) traceLog.shift();
+	broadcast("trace", out);
+}
+
+// ---------------------------------------------------------------- real Pi agents (one `pi --mode json` run per request / prompt)
+function piEnv(agent) {
+	const common = { HOME: process.env.HOME ?? "/home/node", PI_BUS_URL: BUS_URL, MASKER_UI_URL: "off" };
+	return agent === "prod"
+		? { ...common, PI_AGENT_ID: "prod", PI_DB_ROLE: "producer", PI_PG_URL: PROD_URL }
+		: { ...common, PI_AGENT_ID: "test", PI_DB_ROLE: "consumer", PI_PG_URL: TEST_URL };
+}
+
+/** Run the real agent once (like pi/prod/run.sh does per request). Resolves with the exit code. */
+function runPi(agent, prompt, holder) {
+	return new Promise((resolve) => {
+		let child;
+		try {
+			child = spawn(PI_BIN, ["--mode", "json", "--approve", prompt], {
+				cwd: path.join(PI_ROOT, agent),
+				env: { ...process.env, ...piEnv(agent) },
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+		} catch (e) { log(agent, `cannot start pi: ${e.message}`); return resolve(-1); }
+		holder.child = child;
+		const rl = readline.createInterface({ input: child.stdout });
+		rl.on("line", (line) => {
+			let ev;
+			try { ev = JSON.parse(line); } catch { return; }
+			if (["agent_start", "tool_execution_start", "tool_execution_end", "agent_end", "error"].includes(ev.type)
+				|| (ev.type === "message_end" && ev.message?.role === "assistant")) ingestTrace(agent, ev);
+		});
+		child.stderr.on("data", (b) => {
+			for (const l of b.toString().split("\n")) {
+				// pi tries to lock the project settings file; the rootfs is read-only and the warning is harmless
+				if (l.trim() && !/settings\.json\.lock/.test(l) && !/docs\/(providers|models)\.md$/.test(l.trim())) log(agent, l.trim());
+			}
+		});
+		child.on("error", (e) => { log(agent, `pi failed: ${e.message}`); });
+		child.on("exit", (code, signal) => { if (holder.child === child) holder.child = null; resolve(signal ? -1 : code ?? -1); });
+	});
+}
+
+async function piProdLoop() {
+	log("prod", `Pi agent online (${agentModel("prod") ?? "model from global settings"}) — polling the bus, one model run per pending request`);
+	try {
+		while (prodAgent.running) {
+			let n = 0;
+			try { n = (await bus.query("SELECT count(*)::int AS n FROM mq.messages WHERE recipient = 'prod' AND consumed_at IS NULL")).rows[0].n; }
+			catch (e) { log("prod", `bus error: ${e.message}`); await sleep(3000); continue; }
+			if (n === 0) { await sleep(2000); continue; }
+			const code = await runPi("prod", PROD_PROMPT, prodAgent);
+			if (code !== 0 && prodAgent.running) { log("prod", `pi run exited with ${code} — request left on the bus, retrying in 15s (is pi logged in? docker exec -it masker-ui pi → /login)`); await sleep(15000); }
+		}
+	} finally {
+		prodAgent.running = false; prodAgent.pid = null; prodAgent.since = null; prodAgent.loop = null;
+		log("prod", "stopped");
+		pushState();
+	}
+}
+
+async function runTestPrompt(text) {
+	if (!testAgent.running || testAgent.mode !== "pi") throw new Error("test agent is not running in Pi mode");
+	if (testAgent.busy) throw new Error("the test agent is still working on the previous prompt");
+	testAgent.busy = true; pushState();
+	log("test", `prompt → Pi agent: ${text.slice(0, 120)}`);
+	try {
+		const code = await runPi("test", text, testAgent);
+		if (code !== 0) log("test", `pi run exited with ${code} (is pi logged in? docker exec -it masker-ui pi → /login)`);
+		testAgent.handled += 1;
+	} finally { testAgent.busy = false; pushState(); stats(); }
+}
+
+// ---------------------------------------------------------------- prod agent (emulated: child process; pi: loop above)
 function startProd() {
 	if (prodAgent.running) return;
+	if (prodAgent.mode === "pi") {
+		if (!PI_AVAILABLE) throw new Error("pi is not installed in this container — switch the prod agent to emulated");
+		prodAgent.running = true; prodAgent.since = new Date().toISOString(); prodAgent.stopping = false; prodAgent.pid = null;
+		prodAgent.loop = piProdLoop();
+		pushState();
+		return;
+	}
 	const child = spawn(process.execPath, ["tools/prod-emulator.mjs"], {
 		cwd: PI_ROOT,
 		env: { ...process.env, MASKER_PROD_URL: PROD_URL, BUS_URL, MASKER_UI_URL: `http://127.0.0.1:${PORT}/trace`, MASKER_EMU_POLL_MS: "1000" },
@@ -202,7 +312,13 @@ function startProd() {
 
 /** Stop the prod agent and resolve once the process has actually exited. */
 function stopProd() {
-	if (!prodAgent.running || !prodAgent.child) return Promise.resolve();
+	if (!prodAgent.running) return Promise.resolve();
+	if (prodAgent.mode === "pi") {
+		prodAgent.running = false;
+		prodAgent.child?.kill("SIGTERM");
+		return (prodAgent.loop ?? Promise.resolve()).then(() => {});
+	}
+	if (!prodAgent.child) return Promise.resolve();
 	const child = prodAgent.child;
 	prodAgent.stopping = true;
 	return new Promise((resolve) => {
@@ -381,6 +497,7 @@ const SCENARIOS = {
 async function runScenario(kind, params, quiet = false) {
 	if (!SCENARIOS[kind]) throw new Error(`unknown scenario '${kind}'`);
 	if (!testAgent.running) throw new Error("test agent is stopped — start it first");
+	if (testAgent.mode === "pi") throw new Error("the test agent is in Pi mode — send it a prompt instead");
 	if (testAgent.scenario) throw new Error(`scenario '${testAgent.scenario}' is still running`);
 	testAgent.scenario = kind;
 	pushState();
@@ -393,11 +510,14 @@ async function runScenario(kind, params, quiet = false) {
 
 function startTest() {
 	if (testAgent.running) return;
+	if (testAgent.mode === "pi" && !PI_AVAILABLE) throw new Error("pi is not installed in this container — switch the test agent to emulated");
 	testAgent.running = true;
 	testAgent.since = new Date().toISOString();
-	testAgent.loop = consumerLoop();
+	if (testAgent.mode === "emulated") testAgent.loop = consumerLoop();
 	setAutoSync(testAgent.autoSync, testAgent.intervalMs);
-	log("ui", "test agent started (consuming replies, inserting masked rows into fintechT)");
+	log("ui", testAgent.mode === "pi"
+		? `test agent started in Pi mode (${agentModel("test") ?? "model from global settings"}) — send it a prompt from the page`
+		: "test agent started (emulated: consuming replies, inserting masked rows into fintechT)");
 	pushState();
 }
 
@@ -407,7 +527,18 @@ function stopTest() {
 	testAgent.since = null;
 	if (testAgent.timer) { clearInterval(testAgent.timer); testAgent.timer = null; }
 	for (const [key, done] of waiters) { waiters.delete(key); done({ body: {} }); }
+	testAgent.child?.kill("SIGTERM");
 	log("ui", "test agent stopped (replies will queue on the bus until it restarts)");
+	pushState();
+}
+
+function setMode(agent, mode) {
+	if (!["pi", "emulated"].includes(mode)) throw new Error("mode must be pi or emulated");
+	if (mode === "pi" && !PI_AVAILABLE) throw new Error("pi is not installed in this container");
+	const a = agent === "prod" ? prodAgent : testAgent;
+	if (a.running) throw new Error(`stop the ${agent} agent before changing its mode`);
+	a.mode = mode;
+	log("ui", `${agent} agent mode: ${mode}${mode === "pi" ? ` (${agentModel(agent) ?? "model from global settings"})` : " (no model)"}`);
 	pushState();
 }
 
@@ -417,7 +548,8 @@ function setAutoSync(enabled, intervalMs) {
 	if (testAgent.timer) { clearInterval(testAgent.timer); testAgent.timer = null; }
 	if (testAgent.autoSync && testAgent.running) {
 		testAgent.timer = setInterval(() => {
-			if (!testAgent.scenario) runScenario("sync", {}, true).catch(() => {});
+			if (testAgent.mode === "pi") { if (!testAgent.busy) runTestPrompt(SYNC_PROMPT).catch((e) => log("test", e.message)); }
+			else if (!testAgent.scenario) runScenario("sync", {}, true).catch(() => {});
 		}, testAgent.intervalMs);
 	}
 	pushState();
@@ -523,7 +655,8 @@ async function fullRun(params) {
 	const seed = Math.min(Math.max(Number(params.seed) || 20, 5), 500);
 	const slice = Math.min(Math.max(Number(params.customers) || 3, 1), Math.min(seed, 50));
 	const append = Math.min(Math.max(Number(params.append) || 2, 1), 50);
-	Object.assign(run, { active: true, params: { seed, customers: slice, append }, startedAt: new Date().toISOString(), finishedAt: null, verdict: null, summary: null,
+	const testModeBefore = testAgent.mode;
+	Object.assign(run, { active: true, params: { seed, customers: slice, append, prod: prodAgent.mode, prodModel: prodAgent.mode === "pi" ? agentModel("prod") : null }, startedAt: new Date().toISOString(), finishedAt: null, verdict: null, summary: null,
 		steps: RUN_STEPS.map((name) => ({ name, status: "pending", detail: "" })) });
 	job.name = "test run"; job.since = run.startedAt;      // greys out the DB buttons
 	testAgent.scenario = "test run";                        // greys out the request buttons
@@ -544,8 +677,8 @@ async function fullRun(params) {
 	try {
 		await step(0, async () => { setAutoSync(false, testAgent.intervalMs); stopTest(); await stopProd(); return "clean slate"; });
 		await step(1, async () => { await clearBus(); await emptyTest(); await seedProd({ customers: seed }); return `prod reseeded with ${seed} customers, test empty, bus empty`; });
-		await step(2, async () => { startProd(); await sleep(800); if (!prodAgent.running) throw new Error("prod agent did not start"); return `pid ${prodAgent.pid}`; });
-		await step(3, async () => { startTest(); testAgent.scenario = "test run"; return "consuming replies into fintechT"; });
+		await step(2, async () => { startProd(); await sleep(800); if (!prodAgent.running) throw new Error("prod agent did not start"); return prodAgent.mode === "pi" ? `Pi agent, ${agentModel("prod") ?? "global model"}` : `emulated, pid ${prodAgent.pid}`; });
+		await step(3, async () => { testAgent.mode = "emulated"; startTest(); testAgent.scenario = "test run"; return "emulated consumer (the run drives the requests), inserting into fintechT"; });
 		await step(4, async () => {
 			const before = testAgent.handled;
 			await SCENARIOS.slice({ customers: slice });
@@ -558,14 +691,14 @@ async function fullRun(params) {
 		await step(7, async () => { checks = await verifyTransfer(); const failed = checks.filter((c) => !c.ok); if (failed.length) throw new Error(failed.map((c) => `${c.name} (${c.detail})`).join("; ")); return checks.map((c) => `✓ ${c.name} — ${c.detail}`).join("\n"); });
 		await step(8, async () => { testAgent.scenario = null; stopTest(); await stopProd(); return "both stopped"; });
 		run.verdict = "pass";
-		run.summary = `PASS · ${checks.length} checks · ${fmtMs(Date.now() - new Date(run.startedAt))}`;
+		run.summary = `PASS · ${checks.length} checks · ${fmtMs(Date.now() - new Date(run.startedAt))} · prod ${run.params.prod === "pi" ? (prodAgent.modelSeen ?? run.params.prodModel ?? "Pi") : "emulated"}`;
 	} catch (e) {
 		run.verdict = "fail";
 		run.summary = `FAIL · ${e.message}`;
 		try { testAgent.scenario = null; stopTest(); await stopProd(); } catch {}
 	} finally {
 		run.active = false; run.finishedAt = new Date().toISOString();
-		job.name = null; job.since = null; testAgent.scenario = null;
+		job.name = null; job.since = null; testAgent.scenario = null; testAgent.mode = testModeBefore;
 		log("run", run.summary);
 		pushRun(); pushState(); stats();
 	}
@@ -639,13 +772,7 @@ const server = http.createServer(async (req, res) => {
 			const text = await readBody(req);
 			for (const line of text.split("\n")) {
 				if (!line.trim()) continue;
-				try {
-					const ev = { at: new Date().toISOString(), ...JSON.parse(line) };
-					if (ev.type === "agent_end") { prodAgent.cycles += 1; pushState(); }
-					traceLog.push(ev);
-					while (traceLog.length > TRACE_KEEP) traceLog.shift();
-					broadcast("trace", ev);
-				} catch { /* ignore malformed lines */ }
+				try { ingestTrace("prod", JSON.parse(line)); } catch { /* ignore malformed lines */ }
 			}
 			res.writeHead(204);
 			return res.end();
@@ -662,8 +789,17 @@ const server = http.createServer(async (req, res) => {
 			case "/api/test/start": startTest(); return json(res, 200, statePayload());
 			case "/api/test/stop": stopTest(); return json(res, 200, statePayload());
 			case "/api/test/autosync": setAutoSync(body.enabled, body.intervalMs ?? testAgent.intervalMs); return json(res, 200, statePayload());
+			case "/api/prod/mode": setMode("prod", body.mode); return json(res, 200, statePayload());
+			case "/api/test/mode": setMode("test", body.mode); return json(res, 200, statePayload());
+			case "/api/test/say": {
+				const text = String(body.text ?? "").trim().slice(0, 2000);
+				if (!text) throw new Error("text must not be empty");
+				runTestPrompt(text).catch((e) => log("test", e.message));
+				return json(res, 202, statePayload());
+			}
 			case "/api/request": {
 				if (!testAgent.running) throw new Error("test agent is stopped — start it first");
+				if (testAgent.mode === "pi") throw new Error("the test agent is in Pi mode — send it a prompt instead");
 				const r = cleanRequest(body);
 				requestAndLoad(r);
 				return json(res, 202, { request: r });
@@ -691,7 +827,7 @@ const server = http.createServer(async (req, res) => {
 		res.writeHead(404);
 		res.end("not found");
 	} catch (err) {
-		const code = /must be|unknown scenario|still running|stopped|too large|JSON|control plane|in progress/.test(err.message) ? 400 : 503;
+		const code = /must be|unknown scenario|still running|stopped|too large|JSON|control plane|in progress|not installed|Pi mode|before changing|not running|previous prompt|not empty/.test(err.message) ? 400 : 503;
 		return json(res, code, { error: err.message });
 	}
 });
@@ -702,6 +838,7 @@ process.on("SIGINT", () => { stopProd(); setTimeout(() => process.exit(0), 500);
 server.listen(PORT, HOST, () => {
 	log("ui", `bus monitor on http://${HOST}:${PORT}  (bus: ${BUS_URL.replace(/\/\/.*@/, "//…@")})`);
 	log("ui", CONTROL ? "control plane ON — agents and databases are driven from the page" : "observer only (MASKER_CONTROL=1 enables the control plane)");
+	if (CONTROL) log("ui", PI_AVAILABLE ? `pi ${PI_VERSION} available — prod: ${agentModel("prod") ?? "global model"}, test: ${agentModel("test") ?? "global model"} (log in once: docker exec -it masker-ui pi → /login)` : "pi not installed — agents run emulated only");
 	tick();
 	setInterval(tick, POLL_MS);
 	setInterval(() => clients.size && stats(), STATS_MS);

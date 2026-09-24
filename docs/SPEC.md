@@ -87,7 +87,9 @@ consumer to request in foreign-key order and how to do an incremental sync.
 **Model.** Both agents pin `openai-codex` / `gpt-6-luna` in their project settings
 (`pi/<agent>/.pi/settings.json`), which override the global Pi settings. Thinking level is
 medium on prod and low on test. Pi's built-in registry does not list this model id, so Pi
-passes it through as a custom id on the Codex provider.
+passes it through as a custom id on the Codex provider. The page shows the configured model
+per agent and, once a run has answered, the provider and model that actually replied, taken
+from the assistant messages in Pi's event stream.
 
 **The prod loop.** `pi/prod/run.sh` polls the bus with a cheap SQL count and only invokes
 the model when a request is pending. Each run handles one request, and `pi/prod/trace.mjs`
@@ -125,10 +127,11 @@ then cards and transactions per account. **Incremental sync:** per entity in for
 order, read the local watermark (the highest id in the test table), request `since_id` past
 it, and page while a reply is full.
 
-## 6. Model-free emulation
+## 6. Model-free emulation (fallback)
 
-Every part of the protocol also exists as plain code, so the transfer runs where no model or
-Pi is available and costs nothing to run for verification.
+The Pi agents are the project. Every part of the protocol nevertheless also exists as plain
+code, as a fallback switch on the page and for free verification runs; the emulators never
+call a model.
 
 - `pi/tools/prod-emulator.mjs` is the producer without a model: the same claim SQL as
   `mailbox_wait`, the same query builder and `maskRow` as `query_masked`, the same reply
@@ -154,16 +157,18 @@ everything:
 
 | Control | Does |
 |---|---|
-| prod agent start / stop | supervises `prod-emulator.mjs` as a child process; stop waits for exit |
-| test agent start / stop | the in-process consumer loop; replies queue on the bus while it is stopped |
-| request form | one request with entity, limit, `customer_id`, `account_id`, `since_id` |
-| scenarios | *copy 5 customers + everything*, *incremental sync* |
-| auto-sync | repeats the incremental sync every 30 s, 60 s, or 5 min |
+| mode switch per agent | **Pi agent** (default when Pi is installed) or **emulated**; changeable only while that agent is stopped |
+| prod agent start / stop | Pi mode: the same loop as `pi/prod/run.sh`, one `pi --mode json` run per pending request, trace streamed to the page. Emulated: supervises `prod-emulator.mjs`; stop waits for exit |
+| test agent start / stop | Pi mode: the real test agent; the page sends it prompts, each prompt is one `pi --mode json` run with its own trace card. Emulated: the in-process consumer loop |
+| prompt box (Pi mode) | free text to the test agent, plus a *sync new data* shortcut |
+| request form (emulated) | one request with entity, limit, `customer_id`, `account_id`, `since_id` |
+| scenarios (emulated) | *copy 5 customers + everything*, *incremental sync* |
+| auto-sync | Pi mode: sends the sync prompt on the interval; emulated: repeats the incremental sync; 30 s, 60 s, or 5 min |
 | databases | seed prod (N customers), append new, empty test, clear bus, reset all |
 | delete messages | truncates the bus; the timeline and trace empty for every viewer |
 | full test run | §8 |
 
-Endpoints are `POST /api/prod/start|stop`, `/api/test/start|stop|autosync`,
+Endpoints are `POST /api/prod/start|stop|mode`, `/api/test/start|stop|mode|say|autosync`,
 `/api/request`, `/api/scenario`, `/api/db/seed|append|empty-test|clear-bus|reset`,
 `/api/run`, `/api/start-all`, `/api/stop-all`; `GET /api/state`, `/api/history`, and the
 `/events` stream. `POST /trace` receives trace lines from the prod side.
@@ -178,7 +183,9 @@ run can be active; a second request is refused and the manual buttons lock until
 
 1. Stop both agents and auto-sync.
 2. Clear the bus, empty `fintechT`, reseed `fintechP` (default 20 customers).
-3. Start the prod agent, then the test agent.
+3. Start the prod agent in its selected mode (Pi by default, so gpt-6-luna handles every
+   request), then the test consumer, always emulated for the run because the run itself
+   drives the requests.
 4. Copy a slice (default 3 customers) with everything hanging off them.
 5. Append new customers to prod (default 2).
 6. Incremental sync, so only the new rows cross.
@@ -208,6 +215,10 @@ deliberately deviates. `docs/ARCHITECTURE.md` has the topology and threat model.
   `secrets.prod/`, full `.gitignore` coverage, `deploy.sh projects.home.iktdts.com`.
 - Base images `node:24` and `python:3.13-slim`; `package-lock.json` committed.
 - No native browser popouts except one confirm on the destructive reset; no LangChain.
+
+- Pi is installed in the `masker-ui` image (pinned version), with the Pi home on a named
+  volume so the Codex login and sessions survive rebuilds; the agents run as the container's
+  non-root user.
 
 **Deliberate deviations**
 

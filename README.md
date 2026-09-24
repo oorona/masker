@@ -4,10 +4,11 @@ A proof of concept for one pattern: **mask sensitive data at the producer, befor
 the wire between two agents.** Companion to the article *"Two Pi Agents and a Customer
 Table: Masking PII Before It Crosses the Wire."*
 
-> **Status: built and deployed.** The two agents, the bus, the masking boundary, the
-> model-free emulation, and the control-plane UI implement the spec in `docs/SPEC.md`. The
-> home-lab instance at `https://masker.home.iktdts.com` runs the whole demonstration from the
-> browser, including a one-button full test with a pass/fail verdict.
+> **Status: built and deployed.** The two Pi agents, the bus, the masking boundary, and the
+> control-plane UI implement the spec in `docs/SPEC.md`. The home-lab instance at
+> `https://masker.home.iktdts.com` runs the real agents (gpt-6-luna) inside its container
+> and drives the whole demonstration from the browser, including a one-button full test with
+> a pass/fail verdict. A model-free emulated mode exists as a fallback switch.
 
 Two independent [Pi](https://pi.dev) agents talk over a shared mailbox:
 
@@ -49,9 +50,10 @@ the entire security boundary.
 - **Symmetric transport.** Both agents share one `mailbox` extension over a Postgres
   `mq.messages` table. Roles (`producer` / `consumer`) are environment config, not forks.
 - **Visible traces and a control plane.** A web page tails the bus and shows the two agents
-  talking: paired requests and masked replies, round-trip times, the prod trace, and prod
-  versus test row counts. In control mode it also starts and stops the model-free agents,
-  seeds or resets the databases, and runs a complete test from a clean slate to a verdict.
+  talking: paired requests and masked replies, round-trip times, both agents' traces with the
+  model that answered, and prod versus test row counts. In control mode it starts and stops
+  the Pi agents, sends prompts to the test agent, seeds or resets the databases, and runs a
+  complete test from a clean slate to a verdict.
 
 ## Docs
 
@@ -90,8 +92,9 @@ is verified, and the agents stop. Or run the real Pi agents in two terminals
 
 - The boundary is one pure function, and the producer's tools are the enforcement; prompts
   narrate, they do not protect.
-- Every side of the protocol exists as plain code too, so the demo runs and verifies without
-  a model, and the real and emulated sides are interchangeable.
+- The Pi agents run inside the deployed container (Pi is in the image, the login on a
+  volume), so the demo on the box is the real thing. Every side of the protocol also exists as
+  plain code, a fallback that verifies the transfer without a model.
 - The PoC keeps its own Postgres with demo credentials and no auth on the LAN-only page;
   these are documented deviations from the `/architecture` canon (SPEC §9), the rest of the
   canon (prefixed services, hardening, two-env deploy, Traefik ingress) is followed.

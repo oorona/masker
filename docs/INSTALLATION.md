@@ -38,8 +38,18 @@ setup is untouched. Pi's built-in model registry does not list `gpt-6-luna`; Pi 
 one-line warning and passes the id through to the Codex provider as a custom model. To use
 another model, change these two files (or run `pi --model provider/id` for one session).
 
-Pi's Codex login is an OAuth token that expires. Start `pi` interactively once and run
-`/login` if a non-interactive run reports `No API key for provider: openai-codex`.
+Pi's Codex login is an OAuth token. On a workstation, start `pi` interactively and run
+`/login`. In the containerised stack (locally or on the home box) Pi lives inside
+`masker-ui`, so log in there once; the login persists on the `masker-pi-home` volume:
+
+```bash
+docker exec -it masker-ui pi        # then type /login, pick OpenAI Codex
+```
+
+Pi prints a login URL. Open it in any browser, finish the login, and paste the redirect URL
+back into the terminal when Pi asks (the headless flow). Leave Pi with `/exit`. Until this
+is done, starting an agent in Pi mode logs `No API key found for the selected model` and
+leaves the request on the bus.
 
 ## Browse the data (pgAdmin)
 
@@ -90,18 +100,24 @@ MASKER_CONTROL=1 ./pi/ui/run.sh                # natively, http://127.0.0.1:5055
 docker compose --profile ui up -d --build      # or containerised, http://127.0.0.1:5056
 ```
 
-On the page:
+On the page, each agent has a mode switch, **Pi agent** (the default when Pi is installed)
+or **emulated** (plain code, no model), and the card shows the configured model and the
+model that actually answered:
 
-- **prod agent** start / stop runs the model-free producer (`pi/tools/prod-emulator.mjs`).
-  While it is stopped, requests wait on the bus.
-- **test agent** start / stop runs the consumer that inserts masked replies into `fintechT`.
-  With it running, the *Ask prod for data* form sends single requests and the scenario
-  buttons run *copy 5 customers + everything* or *incremental sync*. **Auto-sync** repeats
-  the sync every 30 s, 60 s, or 5 min.
+- **prod agent** start / stop. In Pi mode this is the real producer with gpt-6-luna: it polls
+  the bus and runs the agent once per pending request, trace on the right. While it is
+  stopped, requests wait on the bus.
+- **test agent** start / stop. In Pi mode the page shows a prompt box: type what you would
+  type in the terminal ("Pull 5 customers and their accounts…"), and the real test agent runs
+  with its own trace card. In emulated mode the *Ask prod for data* form and the scenario
+  buttons drive requests directly. **Auto-sync** sends the sync prompt (Pi) or repeats the
+  incremental sync (emulated) every 30 s, 60 s, or 5 min.
 - **Databases** shows prod and test counts side by side, with *seed prod*, *append new*,
   *empty test*, *clear bus*, and *reset all*.
 - **Full test run** does the whole demonstration from a clean slate and reports PASS or
-  FAIL with every step's detail (SPEC §8). One run at a time.
+  FAIL with every step's detail (SPEC §8). The prod agent runs in its selected mode, so with
+  Pi mode every request is answered by gpt-6-luna; the test consumer is emulated for the run
+  because the run drives the requests itself. One run at a time.
 - **delete messages** on the timeline truncates the bus.
 
 The real agents and the emulated ones share the protocol, so a real test agent can talk to
@@ -148,6 +164,13 @@ ssh projects.home.iktdts.com 'cd apps/labs/masker && docker compose up -d --buil
 `COMPOSE_PROFILES=ui`, and `MASKER_CONTROL=1`, so that one compose command brings up the
 database, pgAdmin, and the control-plane UI behind Traefik. Seed and reset from the page.
 The DNS name is a CNAME to `projects` in the `home.iktdts.com` zone.
+
+After the first deploy, log Pi in once on the box (the token persists across rebuilds):
+
+```bash
+ssh projects.home.iktdts.com
+docker exec -it masker-ui pi        # /login → OpenAI Codex → open the URL → paste the redirect
+```
 
 ## Reset and teardown
 

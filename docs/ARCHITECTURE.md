@@ -16,7 +16,8 @@ Components, topology, and where the trust boundaries sit, in the shape of the
 | Data | PostgreSQL 16 in one project container holding `fintechP` (raw), `fintechT` (masked), `bus` |
 | Mock data | Python 3.13 + Faker (`db/seed.py`), run natively or in the `masker-seed` container |
 | UI and control plane | Node 24 HTTP server with Server-Sent Events, one static HTML page, no build step |
-| Model-free workers | `pi/tools/prod-emulator.mjs` (producer), the UI server's test agent (consumer), baseline and delta sync tools |
+| Agent runtime on the box | Pi installed in the `masker-ui` image; login and sessions on the `masker-pi-home` volume; one `pi --mode json` run per request or prompt |
+| Model-free fallback | `pi/tools/prod-emulator.mjs` (producer), the UI server's test consumer, baseline and delta sync tools |
 | Ingress (home lab) | shared Traefik v3 on the external `intranet` network, Cloudflare DNS-01 certificates, LAN allowlist |
 | Deployment | `deploy.sh projects.home.iktdts.com`, two-env convention, `docker compose up -d --build` |
 | Tests | Node's test runner on the masking module; the full test run in the UI verifies the transfer end to end |
@@ -53,7 +54,7 @@ the canon's rule for shared networks.
 |---|---|---|---|---|
 | `masker-db` | `postgres:16` | the three databases; init scripts create them and apply the schema on first boot | project default | `127.0.0.1:5432` |
 | `masker-pgadmin` | `dpage/pgadmin4` | browse the data; the three servers are pre-registered | project default | `127.0.0.1:5050` |
-| `masker-ui` (profile `ui`) | `masker-ui`, built from `pi/Dockerfile` | bus monitor and control plane; spawns the prod emulator and the seeder | project default (+ `intranet` on the home box) | `127.0.0.1:5056` locally, Traefik on the home box |
+| `masker-ui` (profile `ui`) | `masker-ui`, built from `pi/Dockerfile` | bus monitor and control plane; runs the two Pi agents (or their emulators) and the seeder as child processes | project default (+ `intranet` on the home box) | `127.0.0.1:5056` locally, Traefik on the home box |
 | `masker-seed` (profile `seed`) | `python:3.13-slim` | one-shot seeder for hosts without Python | project default | none |
 
 `masker-ui` carries the canon hardening block: `user` 1000:1000, `read_only`, `cap_drop:
@@ -62,8 +63,11 @@ prod emulator and the seeder run as child processes inside it, so they inherit t
 limits. `docker-compose.home.yml` adds the Traefik labels and the external `intranet`
 network; the deployed `.env` selects it through `COMPOSE_FILE`.
 
-The Pi agents themselves are not containers. They run natively where Pi and a model login
-exist (`pi/prod/run.sh`, `pi/test/run.sh`) and reach `masker-db` on the published local port.
+The Pi agents run inside `masker-ui`: Pi is installed in the image and the control plane
+launches `pi --mode json` in `pi/prod` or `pi/test` with the same environment the shell
+scripts set. The Codex login lives in `/home/node/.pi` on the `masker-pi-home` volume and is
+done once, interactively, with `docker exec -it masker-ui pi` → `/login`. On a workstation the
+same agents also run natively (`pi/prod/run.sh`, `pi/test/run.sh`) against the published port.
 
 ## 4. Repository layout
 
@@ -108,8 +112,8 @@ read the same file.
 
 Tiers 2 and 3 are present as structure only: `secrets.test/` and `secrets.prod/` exist for
 the deploy convention but hold nothing, because every credential in this PoC is a demo value
-for mock data. The Pi model login lives in the user's global Pi auth store, outside the
-repository.
+for mock data. The one real credential, the Pi Codex login, is never in the repository: on a
+workstation it is Pi's global auth store, on the box it is the `masker-pi-home` volume.
 
 ## 6. Deployment
 
@@ -130,8 +134,8 @@ DNS: `masker.home.iktdts.com` is a CNAME to `projects` in the `home.iktdts.com` 
                                              │
                                              ├── spawns prod emulator ──(B3)──▶ fintechP
                                              └── spawns seeder ─────────(B3)──▶ fintechP
-        Pi prod agent (model) ──(B3)──▶ query_masked ──▶ fintechP
-        Pi test agent (model) ──(B2)──▶ bus + fintechT
+        Pi prod agent (model, inside masker-ui) ──(B3)──▶ query_masked ──▶ fintechP
+        Pi test agent (model, inside masker-ui) ──(B2)──▶ bus + fintechT
 ```
 
 | # | Boundary | Vector | Control |

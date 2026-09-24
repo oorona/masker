@@ -9,8 +9,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."   # repo root
 
 CONTAINER="${MASKER_CONTAINER:-masker-db}"
-PY="./.venv/bin/python"
-[ -x "$PY" ] || PY="python3"
+# Seeder: the local venv if present, otherwise the `seed` compose service (no
+# local Python/Faker needed — e.g. on the deployed home box).
+if [ -x ./.venv/bin/python ]; then
+  SEED=(./.venv/bin/python db/seed.py)
+else
+  SEED=(docker compose run --rm seed)
+fi
 
 if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}\$"; then
   echo "[reset] container '${CONTAINER}' is not running. Start it with: docker compose up -d" >&2
@@ -25,7 +30,7 @@ echo "[reset] clearing the message bus…"
 docker exec "$CONTAINER" psql -U masker -d bus -q -c "TRUNCATE mq.messages RESTART IDENTITY;"
 
 echo "[reset] reseeding production DB (fintechP)…"
-"$PY" db/seed.py "$@"
+"${SEED[@]}" "$@"
 
 echo "[reset] done. Current state:"
 docker exec "$CONTAINER" psql -U masker -d fintechP -t -A -c "SELECT 'fintechP customers = '||count(*) FROM bank.customers;"

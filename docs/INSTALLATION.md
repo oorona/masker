@@ -66,6 +66,80 @@ are `{ entity, limit, customer_id?, account_id? }`:
 - `customer_id` scopes customers/addresses/accounts; `account_id` scopes cards/transactions
 - e.g. *"give me 5 customers"*, *"accounts for customer 3"*, *"transactions for account 12"*
 
+## Watch the agents talk (web UI)
+
+The bus monitor is a small web page that tails the mailbox and renders the conversation:
+every `test → prod` request and `prod → test` masked reply, paired with round-trip times,
+the masked cells highlighted, the prod agent's live trace, and the row counts of both
+databases side by side (raw prod vs masked test). The header shows a live **raw PII on
+bus** counter, the same leak check as below: it must stay at `0`.
+
+```bash
+./pi/ui/run.sh            # http://127.0.0.1:5055  (localhost only) — observer mode
+```
+
+Run it next to the two agent terminals. The prod responder forwards its trace to the page
+automatically (`pi/prod/trace.mjs` posts to `MASKER_UI_URL`, default
+`http://127.0.0.1:5055/trace`; set it to `off` to disable).
+
+### Control plane: run the whole demo from the browser
+
+With `MASKER_CONTROL=1` the same page becomes the control plane. Nothing else has to be
+started by hand; every piece is a button:
+
+- **prod agent — start / stop.** Runs `pi/tools/prod-emulator.mjs` as a child process: the
+  model-free stand-in for the production agent. It claims requests addressed to `prod`, runs
+  them through the same `mask.ts` boundary and replies `{ ok, entity, rows, echo }` exactly
+  like the real agent. Its trace shows in the page, marked *emulated*. While it is stopped,
+  requests queue on the bus (the timeline shows them *waiting for prod*).
+- **test agent — start / stop.** Runs in the server: a `mailbox_wait` loop that consumes
+  replies and inserts the masked rows into `fintechT`. When it is running, the *Ask prod for
+  data* form sends single requests (entity, limit, `customer_id`, `account_id`, `since_id`),
+  and the scenario buttons run *copy 5 customers + everything* (FK order) or *incremental
+  sync* (watermark → `since_id`, paged). **Auto-sync** repeats the incremental sync every
+  30 s / 60 s / 5 min, so new production rows appear in test on their own.
+- **Full test run — one button.** *run one full test* does the whole thing from a clean
+  slate and reports a verdict: stop everything → clear the bus, empty test, reseed prod →
+  start both agents → copy a slice of customers with everything → append new customers to
+  prod → incremental sync → verify → stop both agents. The verification checks that every
+  request got a reply, nothing is left unread on the bus, no raw SSN or card number crossed
+  the wire, test holds the same row counts as prod, and every sensitive column in test is
+  masked. Only one run can be active at a time, and the manual buttons are locked while it
+  runs. The seed size, slice size and append count are inputs on the card.
+- **Delete messages.** The 🗑 button on the timeline (and *clear bus* on the Databases card)
+  truncates `mq.messages`, which empties the timeline and the trace for every viewer.
+- **Databases.** *seed prod* wipes and reseeds `fintechP` with N customers (runs
+  `db/seed.py`), *append new* adds N new customers to prod (the CDC scenario: append, then
+  sync), *empty test*, *clear bus*, and *reset all* (bus + test + reseed).
+
+The activity card logs every action; the page reflects the state for every viewer.
+
+```bash
+MASKER_CONTROL=1 ./pi/ui/run.sh                 # natively (uses ./.venv for seed.py)
+docker compose --profile ui up -d --build       # or containerised: http://127.0.0.1:5056
+```
+
+The control plane never selects a production column: it holds the `fintechP` URL only to
+`count(*)` per table and to hand it to the two workers it starts (emulator, seeder).
+The real Pi agents and the emulated ones are interchangeable per side because the bus
+protocol is the same: a real test agent can talk to the emulated prod and vice versa.
+
+## Deployed instance (home lab)
+
+`https://masker.home.iktdts.com` is the containerised stack on `projects.home.iktdts.com`
+(LAN only): Postgres with the three databases and the control-plane UI. Open the page,
+press *start* on both agents, and run a scenario; seed or reset the databases from the same
+page. Deploy with the shared script from the project root:
+
+```bash
+~/apps/infra/scripts/deploy.sh projects.home.iktdts.com    # rsync + .env.test → .env
+ssh projects.home.iktdts.com 'cd apps/labs/masker && docker compose up -d --build'
+```
+
+`.env.test` sets `COMPOSE_FILE` (adds `docker-compose.home.yml` with the Traefik labels),
+`COMPOSE_PROFILES=ui` and `MASKER_CONTROL=1`; the DNS name is a CNAME to `projects` in the
+`home.iktdts.com` zone (Technitium). Anyone on the LAN who can open the page can drive it.
+
 ## Scenario: keep test in sync with production (CDC)
 
 Start both databases **in sync**, introduce new data to production, and let the agent ship
@@ -137,7 +211,8 @@ import("./pi/lib/mask.ts").then(({maskRow}) =>
 ## Reset
 
 Put the databases back to a clean start (prod reseeded with canonical data, test emptied,
-bus cleared) without recreating the container:
+bus cleared) without recreating the container. The seeder is the local `.venv` when
+present, otherwise the `seed` compose service (no local Python needed):
 
 ```bash
 ./db/reset.sh                    # reseed fintechP, empty fintechT, clear the bus

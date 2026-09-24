@@ -5,8 +5,20 @@
  * result, and its narration — all before the masked data goes back to test.
  *
  * Usage:  pi --mode json "..." 2>/dev/null | node trace.mjs
+ *
+ * Every event line is also forwarded to the bus monitor UI (pi/ui) so the same trace
+ * shows up in the browser. Set MASKER_UI_URL=off to disable; failures are silent.
  */
 import readline from "node:readline";
+
+const UI_URL = process.env.MASKER_UI_URL ?? "http://127.0.0.1:5055/trace";
+const FORWARDED = new Set(["agent_start", "tool_execution_start", "tool_execution_end", "message_end", "agent_end"]);
+
+function forward(line, e) {
+	if (UI_URL === "off" || !FORWARDED.has(e.type)) return;
+	if (e.type === "message_end" && e.message?.role !== "assistant") return;
+	fetch(UI_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: line }).catch(() => {});
+}
 
 const C = {
 	dim: (s) => `\x1b[2m${s}\x1b[0m`,
@@ -67,6 +79,7 @@ rl.on("line", (line) => {
 	} catch {
 		return;
 	}
+	forward(line, e);
 	switch (e.type) {
 		case "agent_start":
 			console.log("\n" + C.dim("─".repeat(70)));

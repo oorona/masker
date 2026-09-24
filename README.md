@@ -49,6 +49,12 @@ the entire security boundary.
   `mq.messages` table. Roles (`producer` / `consumer`) are environment config, not forks.
 - **Visible traces.** The prod loop polls the bus with a cheap SQL count while idle and
   prints the full agent trace (thinking, tool calls, results) for every real request.
+- **A bus monitor and control plane.** `pi/ui` tails the mailbox and shows the two agents
+  talking: paired requests and masked replies, round-trip times, the prod trace, and prod
+  vs test row counts. In control mode the page also starts and stops the model-free agents
+  (`pi/tools/prod-emulator.mjs` and a built-in test agent) and seeds or resets the
+  databases, so the whole transfer runs from the browser without a model. One button runs a
+  complete test from a clean slate to a pass/fail verdict.
 
 ## Tech stack
 
@@ -59,6 +65,8 @@ the entire security boundary.
 - **Mock data:** Python + Faker generating a related bank dataset (customers, addresses,
   accounts, cards, transactions).
 - **Tests:** Node's built-in test runner against the pure masking module.
+- **UI:** a dependency-free Node server (Server-Sent Events over the bus table) and one
+  static HTML page; containerised with the emulators for the home-lab deployment.
 
 ## Limitations
 

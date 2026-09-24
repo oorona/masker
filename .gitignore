@@ -1,8 +1,13 @@
-# Secrets and local config
+# Secrets and local config (two-env deploy convention: .env.<env> + secrets.<env>/)
 .env
+.env.local
+.env.prod
+.env.test
 *.env
 !.env.example
 secrets/
+secrets.prod/
+secrets.test/
 
 # Language/tool junk
 .venv*/

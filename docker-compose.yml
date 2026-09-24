@@ -2,6 +2,13 @@
 #   "fintechP" - production data (sensitive, seeded with mock PII)
 #   "fintechT" - test data (same schema, starts empty; filled with masked rows)
 #   bus        - shared mailbox the two Pi agents communicate through
+#
+# Optional services (compose profiles; enable with --profile or COMPOSE_PROFILES):
+#   ui      - the bus monitor web UI + control plane (pi/ui): shows the agents
+#             talking and starts/stops the model-free agents and seeds/resets the
+#             databases from the page (MASKER_CONTROL=1)
+#   seed    - one-shot: seed fintechP from a container (no local Python needed)
+#             docker compose run --rm seed [--customers N] [--append]
 services:
   db:
     image: postgres:16
@@ -50,6 +57,53 @@ services:
     volumes:
       - masker-pgadmin:/var/lib/pgadmin
       - ./db/pgadmin-servers.json:/pgadmin4/servers.json:ro   # auto-register masker-db
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - default
+
+  # Bus monitor + control plane. The page starts/stops the prod emulator (child
+  # process, pi/tools/prod-emulator.mjs) and the in-process test agent, and runs
+  # db/seed.py / truncates for the database buttons. MASKER_CONTROL=0 makes it a
+  # pure observer. Published on localhost:5056 so it never collides with
+  # ./pi/ui/run.sh (5055); the home overlay exposes it through Traefik instead.
+  ui:
+    build:
+      context: .
+      dockerfile: pi/Dockerfile
+    image: masker-ui
+    container_name: masker-ui
+    profiles: ["ui"]
+    restart: unless-stopped
+    init: true
+    environment:
+      MASKER_UI_HOST: 0.0.0.0
+      MASKER_UI_PORT: "5055"
+      MASKER_CONTROL: ${MASKER_CONTROL:-1}
+      BUS_URL: postgresql://masker:masker@db:5432/bus
+      TEST_PG_URL: postgresql://masker:masker@db:5432/fintechT
+      MASKER_PROD_URL: postgresql://masker:masker@db:5432/fintechP   # count(*) + handed to the workers
+    ports:
+      - "127.0.0.1:${MASKER_UI_PUBLISH_PORT:-5056}:5055"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - default
+
+  # One-shot seeder (Faker) so a host without Python can fill fintechP:
+  #   docker compose run --rm seed              # wipe + reseed prod
+  #   docker compose run --rm seed --append --customers 5
+  seed:
+    image: python:3.13-slim
+    profiles: ["seed"]
+    environment:
+      MASKER_PROD_URL: postgresql://masker:masker@db:5432/fintechP
+      PIP_ROOT_USER_ACTION: ignore
+    volumes:
+      - ./db:/db:ro
+    entrypoint: ["sh", "-c", "pip install -q -r /db/requirements.txt && exec python /db/seed.py \"$@\"", "--"]
     depends_on:
       db:
         condition: service_healthy

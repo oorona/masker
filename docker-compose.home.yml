@@ -1,0 +1,22 @@
+# Overlay for the home box (projects.home.iktdts.com): exposes the bus monitor
+# through the host's Traefik as https://masker.home.iktdts.com, LAN-only.
+# Activated by the deployed .env: COMPOSE_FILE=docker-compose.yml:docker-compose.home.yml
+services:
+  ui:
+    networks:
+      - default
+      - intranet
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: intranet
+      traefik.http.routers.masker.rule: Host(`${MASKER_HOST:-masker.home.iktdts.com}`)
+      traefik.http.routers.masker.entrypoints: websecure
+      traefik.http.routers.masker.tls: "true"
+      traefik.http.routers.masker.tls.certresolver: cloudflare
+      traefik.http.routers.masker.middlewares: masker-lan@docker
+      traefik.http.middlewares.masker-lan.ipallowlist.sourcerange: 10.0.1.0/24,10.0.2.0/24,10.0.20.0/24,10.0.22.0/24,10.0.24.0/24,127.0.0.1/32
+      traefik.http.services.masker.loadbalancer.server.port: "5055"
+
+networks:
+  intranet:
+    external: true

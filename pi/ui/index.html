@@ -79,9 +79,9 @@
   .banner.show { display: block; }
 
   /* ------------------------------------------------------------ top strip: progress + activity */
-  .top { display: grid; grid-template-columns: minmax(360px, 5fr) minmax(300px, 4fr); gap: 14px; padding: 14px 16px 0; }
-  @media (max-width: 1000px) { .top { grid-template-columns: 1fr; } }
-  .top .card { flex: none; }
+  section.top { display: grid; grid-template-columns: minmax(360px, 5fr) minmax(300px, 4fr); gap: 14px; padding: 14px 16px 0; }
+  @media (max-width: 1000px) { section.top { grid-template-columns: 1fr; } }
+  section.top .card { flex: none; }
   #dbrows { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
   @media (max-width: 700px) { #dbrows { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   .dbs .ent { display: flex; flex-direction: column; gap: 3px; font-size: 12px; min-width: 0; }
@@ -175,6 +175,23 @@
   .emu .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
   .emu .note { margin-top: 8px; font-size: 11.5px; color: var(--muted); min-height: 1.2em; }
   .emu .note.warn { color: var(--wait); }
+
+  /* test run card */
+  .run { display: none; }
+  .control .run { display: block; }
+  .run .top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 0; }
+  .run .btn.go { background: var(--ok); border-color: var(--ok); color: #05130c; font-weight: 700; padding: 6px 14px; }
+  .run .btn.go:hover { filter: brightness(1.08); }
+  .run .verdict { margin-top: 10px; padding: 8px 10px; border-radius: 8px; font-weight: 650; font-size: 13px; display: none; }
+  .run .verdict.pass { display: block; background: var(--ok-soft); color: var(--ok); }
+  .run .verdict.fail { display: block; background: var(--bad-soft); color: var(--bad); }
+  .run ol { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  .run li { display: grid; grid-template-columns: 18px 1fr; gap: 6px; font-size: 12.5px; color: var(--muted); }
+  .run li .ic { text-align: center; }
+  .run li.running { color: var(--text); } .run li.running .ic { color: var(--wait); animation: fade .8s infinite alternate; }
+  .run li.done { color: var(--text); } .run li.done .ic { color: var(--ok); }
+  .run li.failed { color: var(--bad); }
+  .run li .d { display: block; font-size: 11.5px; color: var(--muted); font-family: var(--mono); white-space: pre-line; overflow-wrap: anywhere; }
 
   /* activity log lines */
   .ol { display: grid; grid-template-columns: 34px 1fr; gap: 6px; }
@@ -300,7 +317,7 @@
     <div class="card run" id="run">
       <div class="hd">Full test run <span class="grow"></span><span class="hint" id="run-when"></span></div>
       <div class="bd">
-        <div class="top">
+        <div class="top runbar">
           <button class="btn go" id="btn-run">▶ run one full test</button>
           <button class="btn danger" id="btn-abort" style="display:none">■ abort</button>
           <span class="hint">seed <input class="n" id="run-seed" type="number" min="2" max="500" value="8" style="width:54px" /> customers · copy <input class="n" id="run-slice" type="number" min="1" max="50" value="2" style="width:44px" /> · append <input class="n" id="run-append" type="number" min="1" max="50" value="1" style="width:44px" /></span>

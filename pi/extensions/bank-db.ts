@@ -35,7 +35,7 @@ const entityEnum = StringEnum(ENTITIES as unknown as string[]);
 
 const QueryParams = Type.Object({
 	entity: entityEnum,
-	limit: Type.Optional(Type.Number({ description: "Max rows (default 10, cap 200)." })),
+	limit: Type.Optional(Type.Number({ description: "Max rows (default 10, cap 500)." })),
 	customer_id: Type.Optional(Type.Number({ description: "Scope to a customer (customers/addresses/accounts)." })),
 	account_id: Type.Optional(Type.Number({ description: "Scope to an account (cards/transactions)." })),
 	since_id: Type.Optional(Type.Number({ description: "Only rows with id greater than this (incremental sync)." })),
@@ -85,7 +85,7 @@ export default function (pi: ExtensionAPI) {
 			parameters: QueryParams,
 			async execute(_id, params) {
 				const meta = SCHEMA[params.entity as Entity];
-				const limit = Math.min(Math.max(params.limit ?? 10, 1), 200);
+				const limit = Math.min(Math.max(params.limit ?? 10, 1), 500);
 				const where: string[] = [];
 				const args: unknown[] = [];
 				for (const [param, column] of Object.entries(meta.filters)) {

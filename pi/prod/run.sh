@@ -32,6 +32,6 @@ while true; do
     continue
   fi
   # A request is waiting — run the agent once and render its trace.
-  pi --mode json "There is a pending request in your mailbox. Using only your provided tools, call mailbox_wait to read it, then query_masked to fetch the rows, then mailbox_send to return them to test — narrating each step. Then stop." \
+  pi --mode json "There are pending requests in your mailbox. Using only your provided tools, call mailbox_wait to read one, then query_masked to fetch the rows, then mailbox_send to return them to test — narrating each step. Then call mailbox_wait again with timeout_ms 3000 and repeat while requests keep arriving; stop when it returns empty." \
     2>/dev/null | node ./trace.mjs || true
 done

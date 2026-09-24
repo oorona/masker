@@ -29,7 +29,7 @@ you only fetch what you don't already have. For each entity, in FK order
 (customers → addresses → accounts → cards → transactions):
 
 1. Call `local_watermark` for the entity to get the highest id you already hold.
-2. `mailbox_send` to `prod` a request `{ "entity": <entity>, "since_id": <watermark>, "limit": 200 }`.
+2. `mailbox_send` to `prod` a request `{ "entity": <entity>, "since_id": <watermark>, "limit": 500 }`.
 3. `mailbox_wait` for the reply, then `insert_rows` the masked rows (skip the entity if none).
 
 This keeps the test database in sync with production while only ever receiving masked rows.

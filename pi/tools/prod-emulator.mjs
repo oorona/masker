@@ -80,7 +80,7 @@ async function send(to, body) {
 // ------------------------------------------------------------ query_masked (same SQL builder as extensions/bank-db.ts)
 async function queryMasked(params) {
 	const entity = params.entity;
-	const limit = Math.min(Math.max(Number(params.limit ?? 10) || 10, 1), 200);
+	const limit = Math.min(Math.max(Number(params.limit ?? 10) || 10, 1), 500);
 	const where = [];
 	const args = [];
 	for (const [param, column] of Object.entries(FILTERS[entity])) {

@@ -110,7 +110,7 @@ Request, test → prod:
 `entity` is one of `customers`, `addresses`, `accounts`, `cards`, `transactions`.
 `customer_id` scopes customers, addresses, and accounts; `account_id` scopes cards and
 transactions; `since_id` returns only rows with a greater id; `limit` defaults to 10 and is
-capped at 200.
+capped at 500.
 
 Reply, prod → test:
 
@@ -125,7 +125,10 @@ JSONB reorders object keys, so matching compares canonical JSON, not strings.
 Two flows are specified. **Slice:** customers, then addresses and accounts per customer,
 then cards and transactions per account. **Incremental sync:** per entity in foreign-key
 order, read the local watermark (the highest id in the test table), request `since_id` past
-it, and page while a reply is full.
+it, and page while a reply is full. A consumer may send all requests of one level at once;
+the producer handles every pending request in a single run (it calls `mailbox_wait` again
+with a short timeout after each reply and stops when the mailbox is empty), so a level costs
+one model run, not one per request.
 
 ## 6. Model-free emulation (fallback)
 

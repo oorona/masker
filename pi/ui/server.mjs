@@ -64,7 +64,7 @@ function agentModel(agent) {
 		return s.defaultModel ? `${s.defaultProvider ? s.defaultProvider + "/" : ""}${s.defaultModel}` : null;
 	} catch { return null; }
 }
-const PROD_PROMPT = "There is a pending request in your mailbox. Using only your provided tools, call mailbox_wait to read it, then query_masked to fetch the rows, then mailbox_send to return them to test — narrating each step. Then stop.";
+const PROD_PROMPT = "There are pending requests in your mailbox. Using only your provided tools, call mailbox_wait to read one, then query_masked to fetch the rows, then mailbox_send to return them to test — narrating each step. Then call mailbox_wait again with timeout_ms 3000 and repeat while requests keep arriving; stop when it returns empty.";
 const SYNC_PROMPT = "Sync new data from production into the test database: for each entity in foreign-key order use local_watermark, ask prod with since_id, wait for the reply and insert the masked rows. Report what landed.";
 const bus = new Pool({ connectionString: BUS_URL, max: 3 });
 const test = new Pool({ connectionString: TEST_URL, max: 2 });
@@ -332,6 +332,7 @@ function stopProd() {
 // One consumer loop claims every reply addressed to `test`; scenario steps register a
 // waiter keyed by the request they sent (the reply carries it back as `echo`).
 const waiters = new Map(); // canon(echo) -> resolve(reply)
+const deferred = new Set(); // canon(request) whose rows the caller inserts itself (FK order)
 
 /** Stable JSON (sorted keys) so a request and its JSONB `echo` compare equal. */
 function canon(v) {
@@ -393,7 +394,10 @@ async function handleReply(reply) {
 	const b = reply.body ?? {};
 	const rows = Array.isArray(b.rows) ? b.rows : [];
 	const entity = ENTITY_ORDER.includes(b.entity) ? b.entity : b.echo?.entity;
-	if (b.ok === true && rows.length && ENTITY_ORDER.includes(entity)) {
+	const key = b.echo !== undefined ? canon(b.echo) : null;
+	if (key && deferred.has(key)) {
+		log("test", `reply #${reply.id}: ${rows.length} masked ${entity ?? "?"} row(s) received (inserted in FK order below)`);
+	} else if (b.ok === true && rows.length && ENTITY_ORDER.includes(entity)) {
 		const { inserted, skipped, reason } = await insertRows(entity, rows);
 		log("test", `reply #${reply.id}: ${rows.length} masked ${entity} row(s) → inserted ${inserted} new into fintechT` + (skipped ? ` · ${skipped} skipped: ${reason}` : ""));
 	} else if (b.ok === false) {
@@ -402,7 +406,6 @@ async function handleReply(reply) {
 		log("test", `reply #${reply.id}: ${entity ?? "?"} — nothing new`);
 	}
 	testAgent.handled += 1;
-	const key = b.echo !== undefined ? canon(b.echo) : null;
 	if (key && waiters.has(key)) { waiters.get(key)(reply); waiters.delete(key); }
 }
 
@@ -427,15 +430,17 @@ async function consumerLoop() {
 	}
 }
 
-/** One round trip as the test agent does it. Resolves with the masked rows (or [] on timeout). */
-function requestAndLoad(req) {
+/** One round trip as the test agent does it. Resolves with the masked rows (or [] on timeout).
+ *  With defer=true the rows are NOT inserted on arrival; the caller inserts them (FK order). */
+function requestAndLoad(req, defer = false) {
 	if (!testAgent.running) throw new Error("test agent is stopped");
 	const key = canon(req);
+	if (defer) deferred.add(key);
 	return new Promise(async (resolve) => {
 		const timer = setTimeout(() => {
 			if (waiters.get(key) === done) { waiters.delete(key); log("test", `no reply to ${key} within ${REPLY_TIMEOUT_MS / 1000}s — is the prod agent running?`); resolve([]); }
 		}, REPLY_TIMEOUT_MS);
-		const done = (reply) => { clearTimeout(timer); resolve(Array.isArray(reply.body?.rows) ? reply.body.rows : []); };
+		const done = (reply) => { clearTimeout(timer); deferred.delete(key); resolve(Array.isArray(reply.body?.rows) ? reply.body.rows : []); };
 		waiters.set(key, done);
 		try {
 			const id = await mailboxSend(req);
@@ -462,32 +467,44 @@ function cleanRequest(input) {
 		if (!Number.isInteger(n) || n < 0) throw new Error(`${k} must be a non-negative integer`);
 		req[k] = n;
 	}
-	if (req.limit !== undefined) req.limit = Math.min(Math.max(req.limit, 1), 200);
+	if (req.limit !== undefined) req.limit = Math.min(Math.max(req.limit, 1), 500);
 	return req;
 }
 
-// The two flows documented in pi/test/.pi/APPEND_SYSTEM.md.
+// The two flows documented in pi/test/.pi/APPEND_SYSTEM.md. Requests of one FK level go
+// out together, so the prod agent drains them in a single run instead of one run each.
+const PAGE = 500;
 const SCENARIOS = {
 	async slice({ customers = 5 }) {
 		const n = Math.min(Math.max(Number(customers) || 5, 1), 50);
 		const cs = await requestAndLoad({ entity: "customers", limit: n });
-		const accounts = [];
-		for (const c of cs) {
-			await requestAndLoad({ entity: "addresses", customer_id: Number(c.id), limit: 50 });
-			accounts.push(...(await requestAndLoad({ entity: "accounts", customer_id: Number(c.id), limit: 50 })));
-		}
-		for (const a of accounts) {
-			await requestAndLoad({ entity: "cards", account_id: Number(a.id), limit: 50 });
-			await requestAndLoad({ entity: "transactions", account_id: Number(a.id), limit: 200 });
-		}
+		// level 2: addresses + accounts for every customer, all at once
+		const l2 = await Promise.all(cs.flatMap((c) => [
+			requestAndLoad({ entity: "addresses", customer_id: Number(c.id), limit: PAGE }),
+			requestAndLoad({ entity: "accounts", customer_id: Number(c.id), limit: PAGE }),
+		]));
+		const accounts = l2.filter((_, i) => i % 2 === 1).flat();
+		// level 3: cards + transactions for every account, all at once
+		await Promise.all(accounts.flatMap((a) => [
+			requestAndLoad({ entity: "cards", account_id: Number(a.id), limit: PAGE }),
+			requestAndLoad({ entity: "transactions", account_id: Number(a.id), limit: PAGE }),
+		]));
 	},
 	async sync() {
-		for (const entity of ENTITY_ORDER) {
-			// page through the delta: keep asking past the new watermark until a page is short
-			for (let pages = 0; pages < 50 && testAgent.running; pages++) {
-				const wm = await localWatermark(entity);
-				const rows = await requestAndLoad({ entity, since_id: wm, limit: 200 });
-				if (rows.length < 200) break;
+		// ask for every entity's delta at once (deferred), then insert in FK order
+		const reqs = [];
+		for (const entity of ENTITY_ORDER) reqs.push({ entity, since_id: await localWatermark(entity), limit: PAGE });
+		const results = await Promise.all(reqs.map((r) => requestAndLoad(r, true)));
+		for (let i = 0; i < reqs.length; i++) {
+			if (!results[i].length) continue;
+			const { inserted, skipped, reason } = await insertRows(reqs[i].entity, results[i]);
+			log("test", `sync ${reqs[i].entity}: inserted ${inserted} new into fintechT` + (skipped ? ` · ${skipped} skipped: ${reason}` : ""));
+		}
+		// a full page means there is more: page sequentially past the new watermark
+		for (let i = 0; i < reqs.length; i++) {
+			for (let pages = 0; results[i].length >= PAGE && pages < 50 && testAgent.running; pages++) {
+				const wm = await localWatermark(reqs[i].entity);
+				results[i] = await requestAndLoad({ entity: reqs[i].entity, since_id: wm, limit: PAGE });
 			}
 		}
 	},

@@ -24,7 +24,7 @@ Each time you run, follow this protocol exactly:
    Fulfill it by calling `query_masked` with those parameters.
 4. Reply by calling `mailbox_send` to `test` with body
    `{ "ok": true, "entity": <entity>, "rows": <the masked rows>, "echo": <the request> }`.
-5. Call `mailbox_wait` again with `timeout_ms: 3000`. If another request is waiting, handle
+5. Call `mailbox_wait` again with `timeout_ms: 20000`. If another request is waiting, handle
    it the same way (steps 3–4) and repeat. When it returns `{ empty: true }`, stop.
 
 Never invent data. The rows from `query_masked` are already masked — pass them through as-is.

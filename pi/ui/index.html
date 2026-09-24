@@ -350,6 +350,7 @@
           <button class="btn primary rp" id="rp-play" style="--accent:var(--mask)">▶ replay</button>
           <button class="btn rp" id="rp-pause" disabled>❚❚ pause</button>
           <button class="btn rp" id="rp-stop" disabled>■ exit replay</button>
+          <button class="btn sm danger rp" id="rp-delete" title="delete every recording on this server">🗑 delete all</button>
         </div>
         <div class="prog"><i id="rp-bar"></i></div>
         <div class="tm"><span id="rp-elapsed">0:00</span><span id="rp-note">bus messages, tool calls, traces, counts — exactly as they happened, at the speed you pick</span><span id="rp-total">0:00</span></div>
@@ -972,6 +973,7 @@
   });
   $("rp-speed").addEventListener("change", () => { if (rp) { rp.offset = rpElapsed(); rp.t0 = performance.now(); rp.speed = Number($("rp-speed").value) || 5; } });
   $("rp-stop").addEventListener("click", () => location.reload());
+  $("rp-delete").addEventListener("click", () => { if (!replaying && confirm("Delete every recording?")) post("/api/recordings/delete-all").catch((e) => { $("rp-note").textContent = e.message; }); });
 
   // ------------------------------------------------------------ wiring
   function setLive(st, text) { $("live").className = `dot ${st}`; $("livetxt").textContent = text; }

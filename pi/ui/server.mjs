@@ -67,7 +67,7 @@ function agentModel(agent) {
 		return s.defaultModel ? `${s.defaultProvider ? s.defaultProvider + "/" : ""}${s.defaultModel}` : null;
 	} catch { return null; }
 }
-const PROD_PROMPT = "There are pending requests in your mailbox. Using only your provided tools, call mailbox_wait to read one, then query_masked to fetch the rows, then mailbox_send to return them to test — narrating each step. Then call mailbox_wait again with timeout_ms 6000 and repeat while requests keep arriving; stop when it returns empty.";
+const PROD_PROMPT = "There are pending requests in your mailbox. Using only your provided tools, call mailbox_wait to read one, then query_masked to fetch the rows, then mailbox_send to return them to test — narrating each step. Then call mailbox_wait again with timeout_ms 20000 and repeat while requests keep arriving; stop when it returns empty.";
 const SYNC_PROMPT = "Sync new data from production into the test database: for each entity in foreign-key order use local_watermark, ask prod with since_id, wait for the reply and insert the masked rows. Report what landed.";
 const bus = new Pool({ connectionString: BUS_URL, max: 3 });
 const test = new Pool({ connectionString: TEST_URL, max: 2 });
@@ -127,6 +127,17 @@ async function listRecordings() {
 		}
 	} catch { /* no dir yet */ }
 	return out.sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1)).map(({ events, ...h }) => h);
+}
+
+async function deleteRecordings() {
+	let n = memoryRecordings.size; memoryRecordings.clear();
+	try {
+		const fs = await import("node:fs/promises");
+		for (const f of (await readdir(RECORDINGS_DIR)).filter((f) => f.endsWith(".json"))) { await fs.unlink(path.join(RECORDINGS_DIR, f)); n++; }
+	} catch { /* no dir */ }
+	log("ui", `deleted ${n} recording(s)`);
+	broadcast("recordings", []);
+	return n;
 }
 
 async function getRecording(id) {
@@ -528,9 +539,13 @@ function cleanRequest(input) {
 // keeps waiting a few seconds after each reply, so a chain of hops is one run.
 const PAGE = 500;
 const BATCH = { customers: 500, addresses: 500, accounts: 500, cards: 500, transactions: 30 };
+// After a whole-table hop, hold for a moment so the table that just crossed can be seen;
+// no hold between transaction batches (their progress is the show). The prod agent's
+// wait between hops (20s) outlasts the hold, so the chain stays one run.
+const HOLD_MS = { customers: 12000, addresses: 12000, accounts: 12000, cards: 12000, transactions: 0 };
 const SCENARIOS = {
 	// copy every table in FK order: watermark → since_id, paged per entity while a page is full
-	async copy() {
+	async copy({ hold = true } = {}) {
 		for (const entity of ENTITY_ORDER) {
 			const limit = BATCH[entity] ?? PAGE;
 			for (let pages = 0; pages < 200 && testAgent.running; pages++) {
@@ -538,6 +553,8 @@ const SCENARIOS = {
 				const rows = await requestAndLoad({ entity, since_id: wm, limit });
 				if (rows.length < limit) break;
 			}
+			const ms = hold ? (HOLD_MS[entity] ?? 0) : 0;
+			if (ms && testAgent.running) { log("test", `${entity} across — holding ${ms / 1000}s before the next table`); await sleep(ms); }
 		}
 	},
 	// copy N customers and everything hanging off them, one scoped request at a time
@@ -555,7 +572,7 @@ const SCENARIOS = {
 		}
 	},
 	// incremental sync: same as copy (watermark → since_id), which is the point of the CDC flow
-	async sync() { return SCENARIOS.copy(); },
+	async sync() { return SCENARIOS.copy({ hold: false }); },
 };
 
 async function runScenario(kind, params, quiet = false) {
@@ -899,6 +916,7 @@ const server = http.createServer(async (req, res) => {
 			case "/api/db/append": runJob("append prod", () => seedProd({ customers: body.customers ?? 5, append: true })); return json(res, 202, statePayload());
 			case "/api/db/empty-test": runJob("empty test", emptyTest); return json(res, 202, statePayload());
 			case "/api/db/clear-bus": runJob("clear bus", clearBus); return json(res, 202, statePayload());
+			case "/api/recordings/delete-all": return json(res, 200, { deleted: await deleteRecordings() });
 			case "/api/db/reset":
 				runJob("reset all", async () => { await clearBus(); await emptyTest(); await seedProd({ customers: body.customers }); });
 				return json(res, 202, statePayload());

@@ -198,8 +198,9 @@ run can be active; a second request is refused and the manual buttons lock until
 3. Start the prod agent in its selected mode (Pi by default, so gpt-6-luna handles every
    request), then the test consumer, always emulated for the run because the run itself
    drives the requests.
-4. Copy production table by table: customers, addresses, accounts and cards in one hop each,
-   transactions in batches of 30 rows, so the bulk of the data shows its progress.
+4. Copy production table by table: customers, addresses, accounts and cards in one hop each
+   with a 12-second hold after each so the table that crossed can be seen, then transactions
+   in batches of 30 rows with no hold, so the bulk of the data shows its progress.
 5. Append new customers to prod (default 1).
 6. Incremental sync, so only the new rows cross.
 7. Verify.

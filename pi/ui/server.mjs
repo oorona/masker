@@ -605,7 +605,7 @@ async function clearBus() {
 // ---------------------------------------------------------------- full test run (one at a time)
 // One button: clean start → both agents → copy a slice → append new prod rows → incremental
 // sync → verify (counts equal, everything masked, no raw PII on the bus) → stop the agents.
-const run = { active: false, params: null, steps: [], startedAt: null, finishedAt: null, verdict: null, summary: null };
+const run = { active: false, aborting: false, params: null, steps: [], startedAt: null, finishedAt: null, verdict: null, summary: null };
 const RUN_STEPS = [
 	"stop agents and auto-sync",
 	"reset: clear bus, empty test, seed prod",
@@ -618,7 +618,7 @@ const RUN_STEPS = [
 	"stop both agents",
 ];
 function runSummary() {
-	return { active: run.active, params: run.params, steps: run.steps, startedAt: run.startedAt, finishedAt: run.finishedAt, verdict: run.verdict, summary: run.summary };
+	return { active: run.active, aborting: run.aborting, params: run.params, steps: run.steps, startedAt: run.startedAt, finishedAt: run.finishedAt, verdict: run.verdict, summary: run.summary };
 }
 const pushRun = () => broadcast("run", runSummary());
 
@@ -651,11 +651,11 @@ async function fullRun(params) {
 	if (run.active) throw new Error("a test run is already in progress — only one at a time");
 	if (job.name) throw new Error(`'${job.name}' is still running`);
 	if (testAgent.scenario) throw new Error(`scenario '${testAgent.scenario}' is still running`);
-	const seed = Math.min(Math.max(Number(params.seed) || 20, 5), 500);
-	const slice = Math.min(Math.max(Number(params.customers) || 3, 1), Math.min(seed, 50));
-	const append = Math.min(Math.max(Number(params.append) || 2, 1), 50);
+	const seed = Math.min(Math.max(Number(params.seed) || 8, 2), 500);
+	const slice = Math.min(Math.max(Number(params.customers) || 2, 1), Math.min(seed, 50));
+	const append = Math.min(Math.max(Number(params.append) || 1, 1), 50);
 	const testModeBefore = testAgent.mode;
-	Object.assign(run, { active: true, params: { seed, customers: slice, append, prod: prodAgent.mode, prodModel: prodAgent.mode === "pi" ? agentModel("prod") : null }, startedAt: new Date().toISOString(), finishedAt: null, verdict: null, summary: null,
+	Object.assign(run, { active: true, aborting: false, params: { seed, customers: slice, append, prod: prodAgent.mode, prodModel: prodAgent.mode === "pi" ? agentModel("prod") : null }, startedAt: new Date().toISOString(), finishedAt: null, verdict: null, summary: null,
 		steps: RUN_STEPS.map((name) => ({ name, status: "pending", detail: "" })) });
 	job.name = "test run"; job.since = run.startedAt;      // greys out the DB buttons
 	testAgent.scenario = "test run";                        // greys out the request buttons
@@ -663,6 +663,7 @@ async function fullRun(params) {
 	log("run", `full test run started (seed ${seed} customers, copy ${slice}, append ${append})`);
 
 	const step = async (i, fn) => {
+		if (run.aborting) throw new Error("aborted");
 		run.steps[i].status = "running"; pushRun();
 		try {
 			run.steps[i].detail = (await fn()) ?? "";
@@ -693,7 +694,8 @@ async function fullRun(params) {
 		run.summary = `PASS · ${checks.length} checks · ${fmtMs(Date.now() - new Date(run.startedAt))} · prod ${run.params.prod === "pi" ? (prodAgent.modelSeen ?? run.params.prodModel ?? "Pi") : "emulated"}`;
 	} catch (e) {
 		run.verdict = "fail";
-		run.summary = `FAIL · ${e.message}`;
+		run.summary = run.aborting ? `ABORTED by the user after ${fmtMs(Date.now() - new Date(run.startedAt))}` : `FAIL · ${e.message}`;
+		for (const st of run.steps) if (st.status === "running") { st.status = "failed"; st.detail = run.aborting ? "aborted" : st.detail; }
 		try { testAgent.scenario = null; stopTest(); await stopProd(); } catch {}
 	} finally {
 		run.active = false; run.finishedAt = new Date().toISOString();
@@ -701,6 +703,15 @@ async function fullRun(params) {
 		log("run", run.summary);
 		pushRun(); pushState(); stats();
 	}
+}
+/** Abort the active run: stop both agents (which fails the current step) and mark it. */
+async function abortRun() {
+	if (!run.active) return;
+	run.aborting = true; pushRun();
+	log("run", "abort requested — stopping both agents");
+	testAgent.scenario = null;
+	stopTest();
+	await stopProd();
 }
 const fmtMs = (ms) => (ms < 60000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`);
 
@@ -780,7 +791,10 @@ const server = http.createServer(async (req, res) => {
 		if (req.method !== "POST" || !p.startsWith("/api/")) { res.writeHead(404); return res.end("not found"); }
 		needControl();
 		const body = await readJson(req);
-		if (run.active && p !== "/api/run") throw new Error("a test run is in progress — wait for it to finish");
+		if (run.active) {
+			if (["/api/run/abort", "/api/stop-all", "/api/prod/stop", "/api/test/stop"].includes(p)) { await abortRun(); return json(res, 200, statePayload()); }
+			if (p !== "/api/run") throw new Error("a test run is in progress — abort it or wait for it to finish");
+		}
 
 		switch (p) {
 			case "/api/prod/start": startProd(); return json(res, 200, statePayload());
@@ -816,6 +830,7 @@ const server = http.createServer(async (req, res) => {
 				runJob("reset all", async () => { await clearBus(); await emptyTest(); await seedProd({ customers: body.customers }); });
 				return json(res, 202, statePayload());
 			case "/api/stop-all": stopTest(); await stopProd(); return json(res, 200, statePayload());
+			case "/api/run/abort": return json(res, 200, statePayload());
 			case "/api/run": {
 				if (run.active) throw new Error("a test run is already in progress — only one at a time");
 				fullRun(body).catch((e) => log("run", `failed: ${e.message}`));

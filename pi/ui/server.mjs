@@ -523,9 +523,10 @@ function cleanRequest(input) {
 }
 
 // The flows documented in pi/test/.pi/APPEND_SYSTEM.md, strictly one hop at a time so the
-// timeline shows each message cross. Each hop carries a whole table (up to PAGE rows); the
-// prod agent keeps waiting a few seconds after each reply, so a chain of hops is one run.
-const PAGE = 500;
+// timeline shows each message cross, in small batches so the progress is visible: one
+// customer's or one account's rows per hop, and sync paged PAGE rows at a time. The prod
+// agent keeps waiting a few seconds after each reply, so a chain of hops is one run.
+const PAGE = 50;
 const SCENARIOS = {
 	// copy every table, table by table, in FK order (paged past the watermark while full)
 	async copy() {
@@ -539,7 +540,7 @@ const SCENARIOS = {
 	},
 	// copy N customers and everything hanging off them, one scoped request at a time
 	async slice({ customers = 5 }) {
-		const n = Math.min(Math.max(Number(customers) || 5, 1), 50);
+		const n = Math.min(Math.max(Number(customers) || 5, 1), 500);
 		const cs = await requestAndLoad({ entity: "customers", limit: n });
 		const accounts = [];
 		for (const c of cs) {
@@ -673,7 +674,7 @@ const RUN_STEPS = [
 	"reset: clear bus, empty test, seed prod",
 	"start prod agent",
 	"start test agent",
-	"copy production table by table (one hop each)",
+	"copy customers one by one with everything (batched hops)",
 	"append new customers to prod",
 	"incremental sync (only the new rows cross)",
 	"verify the transfer",
@@ -722,7 +723,7 @@ async function fullRun(params) {
 	testAgent.scenario = "test run";                        // greys out the request buttons
 	startRecording({ params: run.params, prodModel: run.params.prodModel });
 	pushState(); pushRun();
-	log("run", `full test run started (seed ${seed} customers, copy everything table by table, append ${append}, sync)`);
+	log("run", `full test run started (seed ${seed} customers, copy them one by one with everything, append ${append}, sync)`);
 
 	const step = async (i, fn) => {
 		if (run.aborting) throw new Error("aborted");
@@ -743,7 +744,7 @@ async function fullRun(params) {
 		await step(3, async () => { testAgent.mode = "emulated"; startTest(); testAgent.scenario = "test run"; return "emulated consumer (the run drives the requests), inserting into fintechT"; });
 		await step(4, async () => {
 			const before = testAgent.handled;
-			await SCENARIOS.copy();
+			await SCENARIOS.slice({ customers: seed });
 			const t = (await test.query(COUNTS_SQL)).rows[0];
 			return `${testAgent.handled - before} round trips · test now ${ENTITY_ORDER.map((e) => `${t[e]} ${e}`).join(", ")}`;
 		});

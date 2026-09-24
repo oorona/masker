@@ -331,9 +331,9 @@
         <div class="top runbar">
           <button class="btn go" id="btn-run">▶ run one full test</button>
           <button class="btn danger" id="btn-abort" style="display:none">■ abort</button>
-          <span class="hint">seed <input class="n" id="run-seed" type="number" min="1" max="500" value="5" style="width:54px" /> customers · append <input class="n" id="run-append" type="number" min="1" max="50" value="1" style="width:44px" /></span>
+          <span class="hint">seed <input class="n" id="run-seed" type="number" min="1" max="500" value="5" style="width:54px" /> customers · <label style="display:inline-flex;align-items:center;gap:4px"><input type="checkbox" id="run-cdc" style="width:auto" /> then append <input class="n" id="run-append" type="number" min="1" max="50" value="1" style="width:44px" /> and sync</label></span>
         </div>
-        <div class="hint" style="margin-top:6px">Clean start → both agents → copy prod (customers, addresses, accounts, cards one hop each; transactions in batches of 30) → append new prod rows → incremental sync → verify → stop. Sequential, one message on the wire at a time.</div>
+        <div class="hint" style="margin-top:6px">Clean start → both agents → copy prod (customers, addresses, accounts, cards one hop each; transactions in batches of 30) → verify → stop. Nothing crosses after the last transactions batch unless the append-and-sync option is ticked. Sequential, one message on the wire at a time.</div>
         <div class="verdict" id="run-verdict"></div>
         <ol id="run-steps"></ol>
       </div>
@@ -823,7 +823,7 @@
   }
   $("btn-run").addEventListener("click", async () => {
     try {
-      const r = await post("/api/run", { seed: Number($("run-seed").value), append: Number($("run-append").value) });
+      const r = await post("/api/run", { seed: Number($("run-seed").value), cdc: $("run-cdc").checked, append: Number($("run-append").value) });
       renderRun(r); stickToBottom = true;
     } catch (e) { const v = $("run-verdict"); v.className = "verdict fail"; v.textContent = e.message; }
   });

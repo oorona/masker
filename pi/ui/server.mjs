@@ -688,17 +688,15 @@ async function clearBus() {
 // One button: clean start → both agents → copy a slice → append new prod rows → incremental
 // sync → verify (counts equal, everything masked, no raw PII on the bus) → stop the agents.
 const run = { active: false, aborting: false, params: null, steps: [], startedAt: null, finishedAt: null, verdict: null, summary: null };
-const RUN_STEPS = [
+const RUN_STEPS_BASE = [
 	"stop agents and auto-sync",
 	"reset: clear bus, empty test, seed prod",
 	"start prod agent",
 	"start test agent",
 	"copy production: whole tables, transactions in batches of 30",
-	"append new customers to prod",
-	"incremental sync (only the new rows cross)",
-	"verify the transfer",
-	"stop both agents",
 ];
+const RUN_STEPS_CDC = ["append new customers to prod", "incremental sync (only the new rows cross)"];
+const RUN_STEPS_END = ["verify the transfer", "stop both agents"];
 function runSummary() {
 	return { active: run.active, aborting: run.aborting, params: run.params, steps: run.steps, startedAt: run.startedAt, finishedAt: run.finishedAt, verdict: run.verdict, summary: run.summary };
 }
@@ -734,15 +732,17 @@ async function fullRun(params) {
 	if (job.name) throw new Error(`'${job.name}' is still running`);
 	if (testAgent.scenario) throw new Error(`scenario '${testAgent.scenario}' is still running`);
 	const seed = Math.min(Math.max(Number(params.seed) || 5, 1), 500);
+	const cdc = /^(1|true|yes)$/i.test(String(params.cdc ?? ""));
 	const append = Math.min(Math.max(Number(params.append) || 1, 1), 50);
+	const STEPS = [...RUN_STEPS_BASE, ...(cdc ? RUN_STEPS_CDC : []), ...RUN_STEPS_END];
 	const testModeBefore = testAgent.mode;
-	Object.assign(run, { active: true, aborting: false, params: { seed, append, prod: prodAgent.mode, prodModel: prodAgent.mode === "pi" ? agentModel("prod") : null }, startedAt: new Date().toISOString(), finishedAt: null, verdict: null, summary: null,
-		steps: RUN_STEPS.map((name) => ({ name, status: "pending", detail: "" })) });
+	Object.assign(run, { active: true, aborting: false, params: { seed, cdc, append: cdc ? append : 0, prod: prodAgent.mode, prodModel: prodAgent.mode === "pi" ? agentModel("prod") : null }, startedAt: new Date().toISOString(), finishedAt: null, verdict: null, summary: null,
+		steps: STEPS.map((name) => ({ name, status: "pending", detail: "" })) });
 	job.name = "test run"; job.since = run.startedAt;      // greys out the DB buttons
 	testAgent.scenario = "test run";                        // greys out the request buttons
 	startRecording({ params: run.params, prodModel: run.params.prodModel });
 	pushState(); pushRun();
-	log("run", `full test run started (seed ${seed} customers, copy whole tables with transactions in 30s, append ${append}, sync)`);
+	log("run", `full test run started (seed ${seed} customers, copy whole tables with transactions in 30s${cdc ? `, then append ${append} and sync` : ""})`);
 
 	const step = async (i, fn) => {
 		if (run.aborting) throw new Error("aborted");
@@ -767,11 +767,14 @@ async function fullRun(params) {
 			const t = (await test.query(COUNTS_SQL)).rows[0];
 			return `${testAgent.handled - before} round trips · test now ${ENTITY_ORDER.map((e) => `${t[e]} ${e}`).join(", ")}`;
 		});
-		await step(5, async () => { await seedProd({ customers: append, append: true }); const p = (await prodCounts.query(COUNTS_SQL)).rows[0]; return `prod now has ${p.customers} customers`; });
-		await step(6, async () => { const before = testAgent.handled; await SCENARIOS.sync(); return `${testAgent.handled - before} round trips, watermark-based`; });
+		let i = 5;
+		if (cdc) {
+			await step(i++, async () => { await seedProd({ customers: append, append: true }); const p = (await prodCounts.query(COUNTS_SQL)).rows[0]; return `prod now has ${p.customers} customers`; });
+			await step(i++, async () => { const before = testAgent.handled; await SCENARIOS.sync(); return `${testAgent.handled - before} round trips, watermark-based`; });
+		}
 		let checks;
-		await step(7, async () => { checks = await verifyTransfer(); const failed = checks.filter((c) => !c.ok); if (failed.length) throw new Error(failed.map((c) => `${c.name} (${c.detail})`).join("; ")); return checks.map((c) => `✓ ${c.name} — ${c.detail}`).join("\n"); });
-		await step(8, async () => { testAgent.scenario = null; stopTest(); await stopProd(); return "both stopped"; });
+		await step(i++, async () => { checks = await verifyTransfer(); const failed = checks.filter((c) => !c.ok); if (failed.length) throw new Error(failed.map((c) => `${c.name} (${c.detail})`).join("; ")); return checks.map((c) => `✓ ${c.name} — ${c.detail}`).join("\n"); });
+		await step(i++, async () => { testAgent.scenario = null; stopTest(); await stopProd(); return "both stopped"; });
 		run.verdict = "pass";
 		run.summary = `PASS · ${checks.length} checks · ${fmtMs(Date.now() - new Date(run.startedAt))} · prod ${run.params.prod === "pi" ? (prodAgent.modelSeen ?? run.params.prodModel ?? "Pi") : "emulated"}`;
 	} catch (e) {

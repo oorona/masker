@@ -201,10 +201,10 @@ run can be active; a second request is refused and the manual buttons lock until
 4. Copy production table by table: customers, addresses, accounts and cards in one hop each
    with a 12-second hold after each so the table that crossed can be seen, then transactions
    in batches of 30 rows with no hold, so the bulk of the data shows its progress.
-5. Append new customers to prod (default 1).
-6. Incremental sync, so only the new rows cross.
-7. Verify.
-8. Stop both agents.
+5. Optional (off by default): append new customers to prod, then an incremental sync so only
+   the new rows cross. With the option off, nothing crosses after the last transactions batch.
+6. Verify.
+7. Stop both agents.
 
 Verification passes when all five hold: every request got a reply; nothing is left unread on
 the bus; no raw SSN or 16-digit number crossed the wire; test holds the same row counts as

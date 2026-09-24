@@ -47,7 +47,7 @@ const STATS_MS = 3000;
 const HISTORY_LIMIT = 500;
 const TRACE_KEEP = 300;
 const LOG_KEEP = 200;
-const REPLY_TIMEOUT_MS = 90_000;
+const REPLY_TIMEOUT_MS = 180_000;
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PI_ROOT = path.resolve(here, "..");

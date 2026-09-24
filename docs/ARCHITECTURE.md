@@ -58,7 +58,10 @@ the canon's rule for shared networks.
 | `masker-seed` (profile `seed`) | `python:3.13-slim` | one-shot seeder for hosts without Python | project default | none |
 
 `masker-ui` carries the canon hardening block: `user` 1000:1000, `read_only`, `cap_drop:
-[ALL]`, `no-new-privileges`, `pids_limit 200`, `mem_limit 512m`, `tmpfs /tmp`. The
+[ALL]`, `no-new-privileges`, `pids_limit 200`, `mem_limit 512m`, `tmpfs /tmp`. Pi locks
+each agent's project settings file when it starts, so the two `.pi` directories are small
+tmpfs mounts that the image entrypoint restores from pristine copies at every start; without
+that, Pi ignores the project settings and the model pin with them. The
 prod emulator and the seeder run as child processes inside it, so they inherit the same
 limits. `docker-compose.home.yml` adds the Traefik labels and the external `intranet`
 network; the deployed `.env` selects it through `COMPOSE_FILE`.

@@ -237,8 +237,7 @@ function runPi(agent, prompt, holder) {
 		});
 		child.stderr.on("data", (b) => {
 			for (const l of b.toString().split("\n")) {
-				// pi tries to lock the project settings file; the rootfs is read-only and the warning is harmless
-				if (l.trim() && !/settings\.json\.lock/.test(l) && !/docs\/(providers|models)\.md$/.test(l.trim())) log(agent, l.trim());
+				if (l.trim() && !/docs\/(providers|models)\.md$/.test(l.trim())) log(agent, l.trim());
 			}
 		});
 		child.on("error", (e) => { log(agent, `pi failed: ${e.message}`); });

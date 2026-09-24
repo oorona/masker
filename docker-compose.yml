@@ -87,6 +87,9 @@ services:
     mem_limit: 512m
     tmpfs:
       - /tmp:size=64m,uid=${APP_UID:-1000},gid=${APP_GID:-1000}
+      # writable copies of the agents' project settings (pi locks them); restored at start
+      - /app/pi/prod/.pi:size=4m,uid=${APP_UID:-1000},gid=${APP_GID:-1000}
+      - /app/pi/test/.pi:size=4m,uid=${APP_UID:-1000},gid=${APP_GID:-1000}
     volumes:
       - masker-pi-home:/home/node/.pi        # Pi login (auth.json), settings, sessions
     environment:

@@ -193,6 +193,17 @@
   .run li.failed { color: var(--bad); }
   .run li .d { display: block; font-size: 11.5px; color: var(--muted); font-family: var(--mono); white-space: pre-line; overflow-wrap: anywhere; }
 
+  /* replay card */
+  .replay { display: none; }
+  .control .replay { display: block; }
+  .replay select { width: 100%; }
+  .replay .prog { height: 6px; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--border); overflow: hidden; margin-top: 8px; }
+  .replay .prog i { display: block; height: 100%; width: 0; background: var(--mask); transition: width .2s linear; }
+  .replay .tm { font-family: var(--mono); font-size: 11.5px; color: var(--muted); margin-top: 4px; display: flex; justify-content: space-between; }
+  body.replaying main button:not(.rp), body.replaying section.top button:not(.rp), body.replaying main input, body.replaying main select:not(.rp), body.replaying section.top input { pointer-events: none; opacity: .45; }
+  body.replaying .card.replay { outline: 2px solid var(--mask); }
+  .live.replay-on { color: var(--mask); }
+
   /* activity log lines */
   .ol { display: grid; grid-template-columns: 34px 1fr; gap: 6px; }
   .ol .s { font-weight: 600; text-transform: uppercase; font-size: 10px; letter-spacing: .06em; padding-top: 2px; }
@@ -325,6 +336,23 @@
         <div class="hint" style="margin-top:6px">Clean start → both agents → copy prod table by table (one hop each, whole tables) → append new prod rows → incremental sync → verify → stop. Sequential, one message on the wire at a time.</div>
         <div class="verdict" id="run-verdict"></div>
         <ol id="run-steps"></ol>
+      </div>
+    </div>
+
+    <div class="card replay" id="replay">
+      <div class="hd">Replay a recorded run <span class="grow"></span><span class="hint" id="rp-count"></span></div>
+      <div class="bd">
+        <select id="rp-select" class="rp"><option value="">no recordings yet — every full test run is recorded</option></select>
+        <div class="row" style="margin-top:8px">
+          <select id="rp-speed" class="rp" style="width:auto">
+            <option value="1">1×</option><option value="2">2×</option><option value="5" selected>5×</option><option value="10">10×</option><option value="20">20×</option>
+          </select>
+          <button class="btn primary rp" id="rp-play" style="--accent:var(--mask)">▶ replay</button>
+          <button class="btn rp" id="rp-pause" disabled>❚❚ pause</button>
+          <button class="btn rp" id="rp-stop" disabled>■ exit replay</button>
+        </div>
+        <div class="prog"><i id="rp-bar"></i></div>
+        <div class="tm"><span id="rp-elapsed">0:00</span><span id="rp-note">bus messages, tool calls, traces, counts — exactly as they happened, at the speed you pick</span><span id="rp-total">0:00</span></div>
       </div>
     </div>
 
@@ -879,6 +907,72 @@
   }
   $("btn-clear-trace").addEventListener("click", () => { traceEl.innerHTML = ""; traceCount = 0; });
 
+  // ------------------------------------------------------------ replay
+  let replaying = false;
+  let rp = null;
+  const fmtClock = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
+  function renderRecordings(list) {
+    const sel = $("rp-select");
+    const cur = sel.value;
+    sel.innerHTML = "";
+    if (!list.length) { sel.appendChild(el("option", null, "no recordings yet — every full test run is recorded")); $("rp-count").textContent = ""; return; }
+    for (const r of list) {
+      const o = el("option", null, `${new Date(r.startedAt).toLocaleString([], { hour12: false })} · ${r.verdict?.toUpperCase() ?? "?"} · ${fmtClock(r.durationMs)} · prod ${r.params?.prod === "pi" ? (r.prodModelSeen ?? r.prodModel ?? "Pi") : "emulated"} · ${r.eventCount} events`);
+      o.value = r.id; sel.appendChild(o);
+    }
+    if (cur && [...sel.options].some((o) => o.value === cur)) sel.value = cur;
+    $("rp-count").textContent = `${list.length} recording${list.length === 1 ? "" : "s"}`;
+  }
+  function clearView() {
+    msgs.clear(); cards.clear(); openRequests.length = 0; pairs.clear(); rtts.length = 0;
+    feed.innerHTML = ""; traceEl.innerHTML = ""; traceCount = 0; oplog.innerHTML = ""; logCount = 0;
+    for (const id of ["s-messages", "s-requests", "s-replies", "s-pending", "s-rows", "s-rtt", "s-leaks"]) $(id).textContent = "–";
+  }
+  function dispatch(ev) {
+    const d = ev.data;
+    switch (ev.event) {
+      case "message": addMessage(d, true); break;
+      case "consumed": { const m = msgs.get(d.id); if (m) { m.consumed_at = d.consumed_at; updateStatus(m); blink(m.recipient); } break; }
+      case "reset": resetAll(); break;
+      case "trace": onTrace(d); break;
+      case "log": addLog(d); break;
+      case "stats": renderStats(d); break;
+      case "state": applyState(d); break;
+      case "run": renderRun(d); break;
+    }
+  }
+  function rpElapsed() { return rp.paused ? rp.offset : rp.offset + (performance.now() - rp.t0) * rp.speed; }
+  function rpTick() {
+    if (!rp || rp.paused) return;
+    const ev = rp.rec.events, elapsed = rpElapsed();
+    while (rp.i < ev.length && ev[rp.i].t <= elapsed) dispatch(ev[rp.i++]);
+    $("rp-bar").style.width = `${Math.min(100, (100 * elapsed) / rp.rec.durationMs)}%`;
+    $("rp-elapsed").textContent = `${fmtClock(elapsed)} · ${rp.speed}×`;
+    if (rp.i >= ev.length) { $("rp-note").textContent = "replay finished — exit replay to go back live"; $("rp-pause").disabled = true; setLive("busy", "replay done"); return; }
+    rp.timer = setTimeout(rpTick, Math.min(250, Math.max(10, (ev[rp.i].t - elapsed) / rp.speed)));
+  }
+  async function startReplay() {
+    const id = $("rp-select").value; if (!id) return;
+    const r = await fetch(`/api/recordings/${id}`); if (!r.ok) { $("rp-note").textContent = "could not load that recording"; return; }
+    const rec = await r.json();
+    replaying = true; document.body.classList.add("replaying");
+    setLive("busy", `replay ${rec.verdict?.toUpperCase() ?? ""}`); $("live").classList.add("replay-on");
+    clearView();
+    rp = { rec, i: 0, speed: Number($("rp-speed").value) || 5, t0: performance.now(), offset: 0, paused: false, timer: null };
+    $("rp-total").textContent = fmtClock(rec.durationMs);
+    $("rp-note").textContent = `${rec.summary ?? ""}`;
+    $("rp-play").disabled = true; $("rp-pause").disabled = false; $("rp-stop").disabled = false;
+    rpTick();
+  }
+  $("rp-play").addEventListener("click", () => startReplay().catch((e) => { $("rp-note").textContent = e.message; }));
+  $("rp-pause").addEventListener("click", () => {
+    if (!rp) return;
+    if (rp.paused) { rp.paused = false; rp.t0 = performance.now(); $("rp-pause").textContent = "❚❚ pause"; rpTick(); }
+    else { rp.offset = rpElapsed(); rp.paused = true; clearTimeout(rp.timer); $("rp-pause").textContent = "▶ resume"; }
+  });
+  $("rp-speed").addEventListener("change", () => { if (rp) { rp.offset = rpElapsed(); rp.t0 = performance.now(); rp.speed = Number($("rp-speed").value) || 5; } });
+  $("rp-stop").addEventListener("click", () => location.reload());
+
   // ------------------------------------------------------------ wiring
   function setLive(st, text) { $("live").className = `dot ${st}`; $("livetxt").textContent = text; }
   function setBanner(text) { const b = $("banner"); b.textContent = text ?? ""; b.classList.toggle("show", !!text); }
@@ -893,25 +987,28 @@
 
   function connect() {
     const es = new EventSource("/events");
-    es.onopen = () => setLive("on", "live");
-    es.onerror = () => setLive("off", "reconnecting…");
+    es.onopen = () => { if (!replaying) setLive("on", "live"); };
+    es.onerror = () => { if (!replaying) setLive("off", "reconnecting…"); };
+    es.addEventListener("recordings", (ev) => renderRecordings(JSON.parse(ev.data)));
     es.addEventListener("state", (ev) => {
+      if (replaying) return;
       const s = JSON.parse(ev.data);
       applyState(s);
       if (s.bus === false) setBanner(`bus unreachable: ${s.error ?? "?"} — is the database up?`);
       else if (s.bus === true) setBanner(null);
     });
-    es.addEventListener("message", (ev) => addMessage(JSON.parse(ev.data), true));
+    es.addEventListener("message", (ev) => { if (!replaying) addMessage(JSON.parse(ev.data), true); });
     es.addEventListener("consumed", (ev) => {
+      if (replaying) return;
       const { id, consumed_at } = JSON.parse(ev.data);
       const m = msgs.get(id); if (!m) return;
       m.consumed_at = consumed_at; updateStatus(m); blink(m.recipient);
     });
-    es.addEventListener("reset", resetAll);
-    es.addEventListener("stats", (ev) => renderStats(JSON.parse(ev.data)));
-    es.addEventListener("trace", (ev) => onTrace(JSON.parse(ev.data)));
-    es.addEventListener("log", (ev) => addLog(JSON.parse(ev.data)));
-    es.addEventListener("run", (ev) => renderRun(JSON.parse(ev.data)));
+    es.addEventListener("reset", () => { if (!replaying) resetAll(); });
+    es.addEventListener("stats", (ev) => { if (!replaying) renderStats(JSON.parse(ev.data)); });
+    es.addEventListener("trace", (ev) => { if (!replaying) onTrace(JSON.parse(ev.data)); });
+    es.addEventListener("log", (ev) => { if (!replaying) addLog(JSON.parse(ev.data)); });
+    es.addEventListener("run", (ev) => { if (!replaying) renderRun(JSON.parse(ev.data)); });
   }
 
   loadHistory().catch((e) => setBanner(`could not load history: ${e.message}`)).finally(connect);

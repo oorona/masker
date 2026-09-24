@@ -100,6 +100,7 @@ services:
       BUS_URL: postgresql://masker:masker@masker-db:5432/bus
       TEST_PG_URL: postgresql://masker:masker@masker-db:5432/fintechT
       MASKER_PROD_URL: postgresql://masker:masker@masker-db:5432/fintechP   # count(*) + handed to the workers
+      MASKER_RECORDINGS_DIR: /home/node/.pi/masker-recordings                 # on the masker-pi-home volume
     ports:
       - "127.0.0.1:${MASKER_UI_PUBLISH_PORT:-5056}:5055"
     depends_on:

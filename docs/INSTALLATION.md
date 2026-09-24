@@ -119,6 +119,10 @@ model that actually answered:
   Pi mode every request is answered by gpt-6-luna; the test consumer is emulated for the run
   because the run drives the requests itself. One run at a time.
 - **delete messages** on the timeline truncates the bus.
+- **Replay a recorded run.** Every full test run is recorded (messages, tool calls, traces,
+  counts, steps, with their timing). Pick a recording, a speed (1× to 20×), and press
+  *replay*: the page plays it back exactly as it happened, only faster, so a four-minute run
+  with the real model reviews in under a minute at 5×. *exit replay* returns to live.
 
 The real agents and the emulated ones share the protocol, so a real test agent can talk to
 the emulated prod and the other way round.

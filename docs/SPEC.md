@@ -169,7 +169,14 @@ everything:
 | auto-sync | Pi mode: sends the sync prompt on the interval; emulated: repeats the incremental sync; 30 s, 60 s, or 5 min |
 | databases | seed prod (N customers), append new, empty test, clear bus, reset all |
 | delete messages | truncates the bus; the timeline and trace empty for every viewer |
-| full test run | §8 |
+| full test run | §8; every run is recorded |
+| replay | plays a recorded run back through the same timeline, traces, log, counts and run card at 1×, 2×, 5×, 10× or 20×, with pause; the page ignores live events until *exit replay* |
+
+Recordings hold every event the page received during a run (bus messages, pick-ups, both
+agents' traces with tool calls and results, the activity log, database counts sampled every
+second, agent state, run steps) with a millisecond offset, as JSON files under
+`MASKER_RECORDINGS_DIR` (the `masker-pi-home` volume on the box; the last 30 are kept).
+`GET /api/recordings` lists them, `GET /api/recordings/<id>` returns one.
 
 Endpoints are `POST /api/prod/start|stop|mode`, `/api/test/start|stop|mode|say|autosync`,
 `/api/request`, `/api/scenario`, `/api/db/seed|append|empty-test|clear-bus|reset`,

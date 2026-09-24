@@ -25,8 +25,9 @@
  * the URL to the workers. It never selects a prod column.
  */
 import http from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
+import os from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 import readline from "node:readline";
 import path from "node:path";
@@ -48,6 +49,8 @@ const HISTORY_LIMIT = 500;
 const TRACE_KEEP = 300;
 const LOG_KEEP = 200;
 const REPLY_TIMEOUT_MS = 180_000;
+const RECORDINGS_DIR = process.env.MASKER_RECORDINGS_DIR ?? path.join(process.env.HOME ?? os.homedir(), ".pi", "masker-recordings");
+const RECORDINGS_KEEP = 30;
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PI_ROOT = path.resolve(here, "..");
@@ -82,6 +85,54 @@ function frame(event, data) {
 function broadcast(event, data) {
 	const f = frame(event, data);
 	for (const res of clients) res.write(f);
+	if (recording) recording.events.push({ t: Date.now() - recording.t0, event, data });
+}
+
+// ---------------------------------------------------------------- recordings (every full run)
+// Everything the page receives during a run — bus messages, pick-ups, both agents' traces
+// with tool calls, the activity log, database counts, agent state, run steps — with a
+// millisecond offset, so the page can replay it at any speed.
+let recording = null;
+
+function startRecording(meta) {
+	recording = { id: new Date().toISOString().replace(/[:.]/g, "-"), t0: Date.now(), meta, events: [] };
+}
+
+async function stopRecording(extra) {
+	if (!recording) return null;
+	const rec = recording; recording = null;
+	const out = { id: rec.id, startedAt: new Date(rec.t0).toISOString(), durationMs: Date.now() - rec.t0, ...rec.meta, ...extra, eventCount: rec.events.length, events: rec.events };
+	try {
+		await mkdir(RECORDINGS_DIR, { recursive: true });
+		await writeFile(path.join(RECORDINGS_DIR, `${rec.id}.json`), JSON.stringify(out));
+		log("ui", `recording saved: ${rec.id} (${out.eventCount} events, ${fmtMs(out.durationMs)})`);
+		const files = (await readdir(RECORDINGS_DIR)).filter((f) => f.endsWith(".json")).sort();
+		for (const f of files.slice(0, Math.max(0, files.length - RECORDINGS_KEEP))) await import("node:fs/promises").then((fs) => fs.unlink(path.join(RECORDINGS_DIR, f)).catch(() => {}));
+	} catch (e) {
+		log("ui", `recording NOT saved (${e.message}) — kept in memory for this session only`);
+		memoryRecordings.set(rec.id, out);
+	}
+	return out;
+}
+const memoryRecordings = new Map();
+
+async function listRecordings() {
+	const out = [...memoryRecordings.values()];
+	try {
+		for (const f of (await readdir(RECORDINGS_DIR)).filter((f) => f.endsWith(".json"))) {
+			try {
+				const r = JSON.parse(await readFile(path.join(RECORDINGS_DIR, f), "utf8"));
+				out.push({ id: r.id, startedAt: r.startedAt, durationMs: r.durationMs, params: r.params, verdict: r.verdict, summary: r.summary, eventCount: r.eventCount, prodModel: r.prodModel });
+			} catch { /* skip unreadable */ }
+		}
+	} catch { /* no dir yet */ }
+	return out.sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1)).map(({ events, ...h }) => h);
+}
+
+async function getRecording(id) {
+	if (!/^[\w-]+$/.test(id)) throw new Error("bad recording id");
+	if (memoryRecordings.has(id)) return memoryRecordings.get(id);
+	return JSON.parse(await readFile(path.join(RECORDINGS_DIR, `${id}.json`), "utf8"));
 }
 function log(src, text) {
 	const line = { at: new Date().toISOString(), src, text: String(text).trimEnd() };
@@ -669,6 +720,7 @@ async function fullRun(params) {
 		steps: RUN_STEPS.map((name) => ({ name, status: "pending", detail: "" })) });
 	job.name = "test run"; job.since = run.startedAt;      // greys out the DB buttons
 	testAgent.scenario = "test run";                        // greys out the request buttons
+	startRecording({ params: run.params, prodModel: run.params.prodModel });
 	pushState(); pushRun();
 	log("run", `full test run started (seed ${seed} customers, copy everything table by table, append ${append}, sync)`);
 
@@ -711,7 +763,9 @@ async function fullRun(params) {
 		run.active = false; run.finishedAt = new Date().toISOString();
 		job.name = null; job.since = null; testAgent.scenario = null; testAgent.mode = testModeBefore;
 		log("run", run.summary);
-		pushRun(); pushState(); stats();
+		pushRun(); pushState(); await stats();
+		const saved = await stopRecording({ verdict: run.verdict, summary: run.summary, prodModelSeen: prodAgent.modelSeen });
+		if (saved) broadcast("recordings", await listRecordings());
 	}
 }
 /** Abort the active run: stop both agents (which fails the current step) and mark it. */
@@ -770,6 +824,11 @@ const server = http.createServer(async (req, res) => {
 		}
 
 		if (req.method === "GET" && p === "/api/state") return json(res, 200, statePayload());
+		if (req.method === "GET" && p === "/api/recordings") return json(res, 200, { recordings: await listRecordings() });
+		if (req.method === "GET" && p.startsWith("/api/recordings/")) {
+			try { return json(res, 200, await getRecording(p.slice("/api/recordings/".length))); }
+			catch (e) { return json(res, 404, { error: `recording not found (${e.message})` }); }
+		}
 
 		if (req.method === "GET" && p === "/events") {
 			res.writeHead(200, {
@@ -780,6 +839,7 @@ const server = http.createServer(async (req, res) => {
 			});
 			res.write(frame("state", statePayload()));
 			res.write(frame("run", runSummary()));
+			listRecordings().then((l) => { if (clients.has(res)) res.write(frame("recordings", l)); });
 			for (const l of opsLog) res.write(frame("log", l));
 			for (const t of traceLog) res.write(frame("trace", t));
 			clients.add(res);
@@ -865,5 +925,6 @@ server.listen(PORT, HOST, () => {
 	if (CONTROL) log("ui", PI_AVAILABLE ? `pi ${PI_VERSION} available — prod: ${agentModel("prod") ?? "global model"}, test: ${agentModel("test") ?? "global model"} (log in once: docker exec -it masker-ui pi → /login)` : "pi not installed — agents run emulated only");
 	tick();
 	setInterval(tick, POLL_MS);
-	setInterval(() => clients.size && stats(), STATS_MS);
+	setInterval(() => clients.size && !recording && stats(), STATS_MS);
+	setInterval(() => recording && stats(), 1000);   // dense count snapshots while a run is recorded
 });

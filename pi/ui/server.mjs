@@ -523,18 +523,20 @@ function cleanRequest(input) {
 }
 
 // The flows documented in pi/test/.pi/APPEND_SYSTEM.md, strictly one hop at a time so the
-// timeline shows each message cross, in small batches so the progress is visible: one
-// customer's or one account's rows per hop, and sync paged PAGE rows at a time. The prod
-// agent keeps waiting a few seconds after each reply, so a chain of hops is one run.
-const PAGE = 50;
+// timeline shows each message cross. Small tables cross whole in one hop; transactions,
+// the bulk of the data, cross in batches of 30 so the progress is visible. The prod agent
+// keeps waiting a few seconds after each reply, so a chain of hops is one run.
+const PAGE = 500;
+const BATCH = { customers: 500, addresses: 500, accounts: 500, cards: 500, transactions: 30 };
 const SCENARIOS = {
-	// copy every table, table by table, in FK order (paged past the watermark while full)
+	// copy every table in FK order: watermark → since_id, paged per entity while a page is full
 	async copy() {
 		for (const entity of ENTITY_ORDER) {
-			for (let pages = 0; pages < 50 && testAgent.running; pages++) {
+			const limit = BATCH[entity] ?? PAGE;
+			for (let pages = 0; pages < 200 && testAgent.running; pages++) {
 				const wm = await localWatermark(entity);
-				const rows = await requestAndLoad({ entity, since_id: wm, limit: PAGE });
-				if (rows.length < PAGE) break;
+				const rows = await requestAndLoad({ entity, since_id: wm, limit });
+				if (rows.length < limit) break;
 			}
 		}
 	},
@@ -674,7 +676,7 @@ const RUN_STEPS = [
 	"reset: clear bus, empty test, seed prod",
 	"start prod agent",
 	"start test agent",
-	"copy customers one by one with everything (batched hops)",
+	"copy production: whole tables, transactions in batches of 30",
 	"append new customers to prod",
 	"incremental sync (only the new rows cross)",
 	"verify the transfer",
@@ -723,7 +725,7 @@ async function fullRun(params) {
 	testAgent.scenario = "test run";                        // greys out the request buttons
 	startRecording({ params: run.params, prodModel: run.params.prodModel });
 	pushState(); pushRun();
-	log("run", `full test run started (seed ${seed} customers, copy them one by one with everything, append ${append}, sync)`);
+	log("run", `full test run started (seed ${seed} customers, copy whole tables with transactions in 30s, append ${append}, sync)`);
 
 	const step = async (i, fn) => {
 		if (run.aborting) throw new Error("aborted");
@@ -744,7 +746,7 @@ async function fullRun(params) {
 		await step(3, async () => { testAgent.mode = "emulated"; startTest(); testAgent.scenario = "test run"; return "emulated consumer (the run drives the requests), inserting into fintechT"; });
 		await step(4, async () => {
 			const before = testAgent.handled;
-			await SCENARIOS.slice({ customers: seed });
+			await SCENARIOS.copy();
 			const t = (await test.query(COUNTS_SQL)).rows[0];
 			return `${testAgent.handled - before} round trips · test now ${ENTITY_ORDER.map((e) => `${t[e]} ${e}`).join(", ")}`;
 		});

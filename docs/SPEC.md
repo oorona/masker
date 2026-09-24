@@ -125,7 +125,8 @@ JSONB reorders object keys, so matching compares canonical JSON, not strings.
 Two flows are specified. **Slice:** customers, then addresses and accounts per customer,
 then cards and transactions per account. **Incremental sync:** per entity in foreign-key
 order, read the local watermark (the highest id in the test table), request `since_id` past
-it, and page while a reply is full (50 rows a page in the control plane, so progress shows).
+it, and page while a reply is full (the control plane pages transactions 30 rows at a time
+and the other tables 500, so the bulk table shows progress).
 Hops are strictly sequential, one message on the wire at a time; the producer keeps waiting
 a few seconds after each reply and handles the next request in the same run, so a chain of
 hops costs one model run, not one per hop.
@@ -197,8 +198,8 @@ run can be active; a second request is refused and the manual buttons lock until
 3. Start the prod agent in its selected mode (Pi by default, so gpt-6-luna handles every
    request), then the test consumer, always emulated for the run because the run itself
    drives the requests.
-4. Copy production in batches: the customers, then each customer's addresses and accounts,
-   then each account's cards and transactions, one hop each, so the progress is visible.
+4. Copy production table by table: customers, addresses, accounts and cards in one hop each,
+   transactions in batches of 30 rows, so the bulk of the data shows its progress.
 5. Append new customers to prod (default 1).
 6. Incremental sync, so only the new rows cross.
 7. Verify.

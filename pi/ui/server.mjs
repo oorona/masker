@@ -64,7 +64,7 @@ function agentModel(agent) {
 		return s.defaultModel ? `${s.defaultProvider ? s.defaultProvider + "/" : ""}${s.defaultModel}` : null;
 	} catch { return null; }
 }
-const PROD_PROMPT = "There are pending requests in your mailbox. Using only your provided tools, call mailbox_wait to read one, then query_masked to fetch the rows, then mailbox_send to return them to test — narrating each step. Then call mailbox_wait again with timeout_ms 3000 and repeat while requests keep arriving; stop when it returns empty.";
+const PROD_PROMPT = "There are pending requests in your mailbox. Using only your provided tools, call mailbox_wait to read one, then query_masked to fetch the rows, then mailbox_send to return them to test — narrating each step. Then call mailbox_wait again with timeout_ms 6000 and repeat while requests keep arriving; stop when it returns empty.";
 const SYNC_PROMPT = "Sync new data from production into the test database: for each entity in foreign-key order use local_watermark, ask prod with since_id, wait for the reply and insert the masked rows. Report what landed.";
 const bus = new Pool({ connectionString: BUS_URL, max: 3 });
 const test = new Pool({ connectionString: TEST_URL, max: 2 });
@@ -426,7 +426,7 @@ async function consumerLoop() {
 			log("test", `error: ${e.message}`);
 			await sleep(3000);
 		}
-		await sleep(700);
+		await sleep(300);
 	}
 }
 
@@ -471,43 +471,37 @@ function cleanRequest(input) {
 	return req;
 }
 
-// The two flows documented in pi/test/.pi/APPEND_SYSTEM.md. Requests of one FK level go
-// out together, so the prod agent drains them in a single run instead of one run each.
+// The flows documented in pi/test/.pi/APPEND_SYSTEM.md, strictly one hop at a time so the
+// timeline shows each message cross. Each hop carries a whole table (up to PAGE rows); the
+// prod agent keeps waiting a few seconds after each reply, so a chain of hops is one run.
 const PAGE = 500;
 const SCENARIOS = {
-	async slice({ customers = 5 }) {
-		const n = Math.min(Math.max(Number(customers) || 5, 1), 50);
-		const cs = await requestAndLoad({ entity: "customers", limit: n });
-		// level 2: addresses + accounts for every customer, all at once
-		const l2 = await Promise.all(cs.flatMap((c) => [
-			requestAndLoad({ entity: "addresses", customer_id: Number(c.id), limit: PAGE }),
-			requestAndLoad({ entity: "accounts", customer_id: Number(c.id), limit: PAGE }),
-		]));
-		const accounts = l2.filter((_, i) => i % 2 === 1).flat();
-		// level 3: cards + transactions for every account, all at once
-		await Promise.all(accounts.flatMap((a) => [
-			requestAndLoad({ entity: "cards", account_id: Number(a.id), limit: PAGE }),
-			requestAndLoad({ entity: "transactions", account_id: Number(a.id), limit: PAGE }),
-		]));
-	},
-	async sync() {
-		// ask for every entity's delta at once (deferred), then insert in FK order
-		const reqs = [];
-		for (const entity of ENTITY_ORDER) reqs.push({ entity, since_id: await localWatermark(entity), limit: PAGE });
-		const results = await Promise.all(reqs.map((r) => requestAndLoad(r, true)));
-		for (let i = 0; i < reqs.length; i++) {
-			if (!results[i].length) continue;
-			const { inserted, skipped, reason } = await insertRows(reqs[i].entity, results[i]);
-			log("test", `sync ${reqs[i].entity}: inserted ${inserted} new into fintechT` + (skipped ? ` · ${skipped} skipped: ${reason}` : ""));
-		}
-		// a full page means there is more: page sequentially past the new watermark
-		for (let i = 0; i < reqs.length; i++) {
-			for (let pages = 0; results[i].length >= PAGE && pages < 50 && testAgent.running; pages++) {
-				const wm = await localWatermark(reqs[i].entity);
-				results[i] = await requestAndLoad({ entity: reqs[i].entity, since_id: wm, limit: PAGE });
+	// copy every table, table by table, in FK order (paged past the watermark while full)
+	async copy() {
+		for (const entity of ENTITY_ORDER) {
+			for (let pages = 0; pages < 50 && testAgent.running; pages++) {
+				const wm = await localWatermark(entity);
+				const rows = await requestAndLoad({ entity, since_id: wm, limit: PAGE });
+				if (rows.length < PAGE) break;
 			}
 		}
 	},
+	// copy N customers and everything hanging off them, one scoped request at a time
+	async slice({ customers = 5 }) {
+		const n = Math.min(Math.max(Number(customers) || 5, 1), 50);
+		const cs = await requestAndLoad({ entity: "customers", limit: n });
+		const accounts = [];
+		for (const c of cs) {
+			await requestAndLoad({ entity: "addresses", customer_id: Number(c.id), limit: PAGE });
+			accounts.push(...(await requestAndLoad({ entity: "accounts", customer_id: Number(c.id), limit: PAGE })));
+		}
+		for (const a of accounts) {
+			await requestAndLoad({ entity: "cards", account_id: Number(a.id), limit: PAGE });
+			await requestAndLoad({ entity: "transactions", account_id: Number(a.id), limit: PAGE });
+		}
+	},
+	// incremental sync: same as copy (watermark → since_id), which is the point of the CDC flow
+	async sync() { return SCENARIOS.copy(); },
 };
 
 async function runScenario(kind, params, quiet = false) {
@@ -628,7 +622,7 @@ const RUN_STEPS = [
 	"reset: clear bus, empty test, seed prod",
 	"start prod agent",
 	"start test agent",
-	"copy a slice of customers with everything",
+	"copy production table by table (one hop each)",
 	"append new customers to prod",
 	"incremental sync (only the new rows cross)",
 	"verify the transfer",
@@ -668,16 +662,15 @@ async function fullRun(params) {
 	if (run.active) throw new Error("a test run is already in progress — only one at a time");
 	if (job.name) throw new Error(`'${job.name}' is still running`);
 	if (testAgent.scenario) throw new Error(`scenario '${testAgent.scenario}' is still running`);
-	const seed = Math.min(Math.max(Number(params.seed) || 8, 2), 500);
-	const slice = Math.min(Math.max(Number(params.customers) || 2, 1), Math.min(seed, 50));
+	const seed = Math.min(Math.max(Number(params.seed) || 5, 1), 500);
 	const append = Math.min(Math.max(Number(params.append) || 1, 1), 50);
 	const testModeBefore = testAgent.mode;
-	Object.assign(run, { active: true, aborting: false, params: { seed, customers: slice, append, prod: prodAgent.mode, prodModel: prodAgent.mode === "pi" ? agentModel("prod") : null }, startedAt: new Date().toISOString(), finishedAt: null, verdict: null, summary: null,
+	Object.assign(run, { active: true, aborting: false, params: { seed, append, prod: prodAgent.mode, prodModel: prodAgent.mode === "pi" ? agentModel("prod") : null }, startedAt: new Date().toISOString(), finishedAt: null, verdict: null, summary: null,
 		steps: RUN_STEPS.map((name) => ({ name, status: "pending", detail: "" })) });
 	job.name = "test run"; job.since = run.startedAt;      // greys out the DB buttons
 	testAgent.scenario = "test run";                        // greys out the request buttons
 	pushState(); pushRun();
-	log("run", `full test run started (seed ${seed} customers, copy ${slice}, append ${append})`);
+	log("run", `full test run started (seed ${seed} customers, copy everything table by table, append ${append}, sync)`);
 
 	const step = async (i, fn) => {
 		if (run.aborting) throw new Error("aborted");
@@ -698,7 +691,7 @@ async function fullRun(params) {
 		await step(3, async () => { testAgent.mode = "emulated"; startTest(); testAgent.scenario = "test run"; return "emulated consumer (the run drives the requests), inserting into fintechT"; });
 		await step(4, async () => {
 			const before = testAgent.handled;
-			await SCENARIOS.slice({ customers: slice });
+			await SCENARIOS.copy();
 			const t = (await test.query(COUNTS_SQL)).rows[0];
 			return `${testAgent.handled - before} round trips · test now ${ENTITY_ORDER.map((e) => `${t[e]} ${e}`).join(", ")}`;
 		});

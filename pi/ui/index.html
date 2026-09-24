@@ -294,7 +294,7 @@
       <div class="legend"><span><span class="sw" style="background:var(--prod)"></span>fintechP · raw</span><span><span class="sw" style="background:var(--test)"></span>fintechT · masked</span></div>
       <div id="dbrows"><div class="empty">connecting…</div></div>
       <div class="acts">
-        <input class="n" id="db-n" type="number" min="1" max="2000" value="20" title="customers" />
+        <input class="n" id="db-n" type="number" min="1" max="2000" value="5" title="customers" />
         <button class="btn" id="btn-seed" title="wipe fintechP and reseed it with N customers (+ everything hanging off them)">seed prod</button>
         <button class="btn" id="btn-append" title="add N NEW customers to fintechP (ids continue) — then sync">append new</button>
         <button class="btn" id="btn-empty">empty test</button>
@@ -320,9 +320,9 @@
         <div class="top runbar">
           <button class="btn go" id="btn-run">▶ run one full test</button>
           <button class="btn danger" id="btn-abort" style="display:none">■ abort</button>
-          <span class="hint">seed <input class="n" id="run-seed" type="number" min="2" max="500" value="8" style="width:54px" /> customers · copy <input class="n" id="run-slice" type="number" min="1" max="50" value="2" style="width:44px" /> · append <input class="n" id="run-append" type="number" min="1" max="50" value="1" style="width:44px" /></span>
+          <span class="hint">seed <input class="n" id="run-seed" type="number" min="1" max="500" value="5" style="width:54px" /> customers · append <input class="n" id="run-append" type="number" min="1" max="50" value="1" style="width:44px" /></span>
         </div>
-        <div class="hint" style="margin-top:6px">Clean start → both agents → copy a slice → append new prod rows → incremental sync → verify → stop. One at a time.</div>
+        <div class="hint" style="margin-top:6px">Clean start → both agents → copy prod table by table (one hop each, whole tables) → append new prod rows → incremental sync → verify → stop. Sequential, one message on the wire at a time.</div>
         <div class="verdict" id="run-verdict"></div>
         <ol id="run-steps"></ol>
       </div>
@@ -396,7 +396,7 @@
         </div>
         <div class="actions">
           <button class="btn primary" id="btn-send">send request →</button>
-          <button class="btn" id="btn-slice" title="customers → addresses/accounts → cards/transactions, in FK order">copy 5 customers + everything</button>
+          <button class="btn" id="btn-slice" title="every table in FK order, one request per table (paged at 500 rows)">copy all tables</button>
           <button class="btn" id="btn-sync" title="per entity: local watermark → since_id request">incremental sync</button>
         </div>
         <div class="note" id="emu-note"></div>
@@ -794,7 +794,7 @@
   }
   $("btn-run").addEventListener("click", async () => {
     try {
-      const r = await post("/api/run", { seed: Number($("run-seed").value), customers: Number($("run-slice").value), append: Number($("run-append").value) });
+      const r = await post("/api/run", { seed: Number($("run-seed").value), append: Number($("run-append").value) });
       renderRun(r); stickToBottom = true;
     } catch (e) { const v = $("run-verdict"); v.className = "verdict fail"; v.textContent = e.message; }
   });
@@ -808,7 +808,7 @@
   const emuErr = (e) => { const nte = $("emu-note"); nte.textContent = e.message; nte.className = "note warn"; };
   const follow = () => { stickToBottom = true; };
   $("btn-send").addEventListener("click", () => post("/api/request", formRequest()).then(follow).catch(emuErr));
-  $("btn-slice").addEventListener("click", () => post("/api/scenario", { kind: "slice", customers: 5 }).then(follow).catch(emuErr));
+  $("btn-slice").addEventListener("click", () => post("/api/scenario", { kind: "copy" }).then(follow).catch(emuErr));
   $("btn-sync").addEventListener("click", () => post("/api/scenario", { kind: "sync" }).then(follow).catch(emuErr));
 
   // ------------------------------------------------------------ activity log

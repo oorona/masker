@@ -125,10 +125,10 @@ JSONB reorders object keys, so matching compares canonical JSON, not strings.
 Two flows are specified. **Slice:** customers, then addresses and accounts per customer,
 then cards and transactions per account. **Incremental sync:** per entity in foreign-key
 order, read the local watermark (the highest id in the test table), request `since_id` past
-it, and page while a reply is full. A consumer may send all requests of one level at once;
-the producer handles every pending request in a single run (it calls `mailbox_wait` again
-with a short timeout after each reply and stops when the mailbox is empty), so a level costs
-one model run, not one per request.
+it, and page while a reply is full. **Copy:** the sync flow from empty test tables, which
+copies production table by table in five hops. Hops are strictly sequential, one message on
+the wire at a time; the producer keeps waiting a few seconds after each reply and handles
+the next request in the same run, so a chain of hops costs one model run, not one per hop.
 
 ## 6. Model-free emulation (fallback)
 
@@ -185,12 +185,13 @@ One button runs the whole demonstration from a clean slate and reports a verdict
 run can be active; a second request is refused and the manual buttons lock until it ends.
 
 1. Stop both agents and auto-sync.
-2. Clear the bus, empty `fintechT`, reseed `fintechP` (default 20 customers).
+2. Clear the bus, empty `fintechT`, reseed `fintechP` (default 5 customers, roughly 10
+   accounts and 120 transactions).
 3. Start the prod agent in its selected mode (Pi by default, so gpt-6-luna handles every
    request), then the test consumer, always emulated for the run because the run itself
    drives the requests.
-4. Copy a slice (default 3 customers) with everything hanging off them.
-5. Append new customers to prod (default 2).
+4. Copy production table by table, one hop per table (whole tables, up to 500 rows a hop).
+5. Append new customers to prod (default 1).
 6. Incremental sync, so only the new rows cross.
 7. Verify.
 8. Stop both agents.

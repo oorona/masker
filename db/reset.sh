@@ -14,7 +14,7 @@ CONTAINER="${MASKER_CONTAINER:-masker-db}"
 if [ -x ./.venv/bin/python ]; then
   SEED=(./.venv/bin/python db/seed.py)
 else
-  SEED=(docker compose run --rm seed)
+  SEED=(docker compose run --rm masker-seed)
 fi
 
 if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}\$"; then

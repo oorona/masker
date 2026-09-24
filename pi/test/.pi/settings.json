@@ -1,4 +1,6 @@
 {
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-6-luna",
   "defaultThinkingLevel": "low",
   "extensions": [
     "../../extensions/mailbox.ts",

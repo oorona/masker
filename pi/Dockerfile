@@ -15,8 +15,8 @@ ENV NODE_ENV=production PIP_ROOT_USER_ACTION=ignore
 COPY db/requirements.txt db/requirements.txt
 RUN pip3 install --no-cache-dir --break-system-packages -r db/requirements.txt
 
-# Pi coding agent, pinned to the version used on the workstation.
-ARG PI_VERSION=0.80.2
+# Pi coding agent, pinned; keep in step with the workstation install.
+ARG PI_VERSION=0.87.1
 RUN npm install -g --no-audit --no-fund @earendil-works/pi-coding-agent@${PI_VERSION} \
  && mkdir -p /home/node/.pi/agent && chown -R node:node /home/node
 
